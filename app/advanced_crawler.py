@@ -188,9 +188,13 @@ def extract_metadata(soup: BeautifulSoup, url: str) -> Dict:
             except Exception:
                 pass
     
-    # H1
+    # H1 Extraction with Fallback
     h1_tags = soup.find_all("h1")
-    h1_text = " ".join([h.get_text(strip=True) for h in h1_tags])
+    if h1_tags:
+        h1_text = " ".join([h.get_text(strip=True) for h in h1_tags])
+    else:
+        # Fallback to title if no h1 found (essential for scoring)
+        h1_text = title
     
     # Remove script/style
     for tag in soup(["script", "style", "nav", "footer", "header"]):
@@ -218,9 +222,11 @@ def extract_metadata(soup: BeautifulSoup, url: str) -> Dict:
             continue
         abs_url = urljoin(url, href)
         if is_valid_url(abs_url):
+            # Normalize immediately to ensure consistency
+            norm_url = normalize_url(abs_url)
             # Prioritize same domain
-            is_same_domain = urlparse(abs_url).netloc == domain
-            links.append((abs_url, is_same_domain))
+            is_same_domain = urlparse(norm_url).netloc == domain
+            links.append((norm_url, is_same_domain))
     
     return {
         "title": title,
