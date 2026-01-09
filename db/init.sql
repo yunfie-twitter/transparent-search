@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS search_queries (
     results_count INTEGER
 );
 
+-- Add index for autocomplete on queries
+CREATE INDEX IF NOT EXISTS search_queries_query_trgm_idx ON search_queries USING gin (query gin_trgm_ops);
+
 -- 6. clicks (Click log)
 CREATE TABLE IF NOT EXISTS clicks (
     id BIGSERIAL PRIMARY KEY,

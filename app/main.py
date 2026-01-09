@@ -26,9 +26,21 @@ async def suggest(q: str, limit: int = 10, db: AsyncSession = Depends(get_db)):
     if not q:
         raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
 
-    # Simple prefix suggest from page titles (PGroonga prefix match: &^)
-    # Note: Using DISTINCT to avoid repetition.
-    query = text("""
+    # 1. Popular user queries (History)
+    # Using pg_trgm ILIKE or standard LIKE with the new index
+    # Group by query to get unique suggestions, ordered by popularity (count)
+    history_query = text("""
+        SELECT query, COUNT(*) as cnt
+        FROM search_queries
+        WHERE query ILIKE :prefix
+        GROUP BY query
+        ORDER BY cnt DESC
+        LIMIT :limit
+    """)
+    
+    # 2. Page titles (Content)
+    # Using PGroonga prefix match (&^)
+    content_query = text("""
         SELECT DISTINCT title
         FROM pages
         WHERE title IS NOT NULL AND title &^ :q
@@ -36,10 +48,34 @@ async def suggest(q: str, limit: int = 10, db: AsyncSession = Depends(get_db)):
         LIMIT :limit
     """)
 
-    result = await db.execute(query, {"q": q, "limit": limit})
-    titles = [r.title for r in result.fetchall() if r.title]
+    # Execute both
+    res_history = await db.execute(history_query, {"prefix": f"{q}%", "limit": limit})
+    history_suggestions = [r.query for r in res_history.fetchall()]
 
-    return {"meta": {"count": len(titles)}, "data": titles}
+    suggestions = []
+    seen = set()
+
+    # Prioritize history
+    for s in history_suggestions:
+        s_clean = s.strip()
+        if s_clean and s_clean not in seen:
+            suggestions.append(s_clean)
+            seen.add(s_clean)
+
+    # Fill remaining with content suggestions if needed
+    if len(suggestions) < limit:
+        res_content = await db.execute(content_query, {"q": q, "limit": limit})
+        content_titles = [r.title for r in res_content.fetchall()]
+        
+        for t in content_titles:
+            t_clean = t.strip()
+            if t_clean and t_clean not in seen:
+                suggestions.append(t_clean)
+                seen.add(t_clean)
+                if len(suggestions) >= limit:
+                    break
+
+    return {"meta": {"count": len(suggestions)}, "data": suggestions}
 
 class ClickEvent(BaseModel):
     query_id: int
