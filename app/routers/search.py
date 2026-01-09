@@ -1,41 +1,100 @@
+import json
+import hashlib
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from ..database import get_db
 from ..utils.intent_detector import IntentDetector
+from ..cache import get_redis_client
 import time
 
 router = APIRouter()
 
+def _get_cache_key(key_type: str, value: str) -> str:
+    """Generate cache key with hash."""
+    return f"{key_type}:{hashlib.sha256(value.encode()).hexdigest()[:16]}"
+
 @router.get("/search")
 async def search(
-    q: str, 
-    limit: int = 10, 
-    offset: int = 0, 
-    explain: bool = False,
-    filter_tracker_risk: str = None,  # 'clean', 'minimal', 'moderate', 'heavy', 'severe'
-    content_types: str = None,  # comma-separated: 'text_article,video,forum'
-    db: AsyncSession = Depends(get_db)
+    q: str = Query(..., min_length=1, max_length=500),
+    limit: int = Query(10, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    explain: bool = Query(False),
+    filter_tracker_risk: Optional[str] = Query(None, regex="^(clean|minimal|moderate|heavy|severe)$"),
+    content_types: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    redis = Depends(get_redis_client),
 ):
-    if not q:
-        raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
-
-    start = time.time()
-    q_lower = q.lower()
+    """Search with caching, intent detection, content-type matching, and tracker filtering."""
     
-    # Detect search intent from query
-    intent_data = IntentDetector.detect_intent(q)
+    if not q or not q.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+    
+    start = time.time()
+    q_lower = q.lower().strip()
+    
+    # Cache key for full search result
+    cache_key = _get_cache_key(
+        "search",
+        f"{q_lower}:{limit}:{offset}:{filter_tracker_risk}:{content_types}:{explain}"
+    )
+    
+    # Try to get from cache
+    if redis:
+        try:
+            cached_result = await redis.get(cache_key)
+            if cached_result:
+                result = json.loads(cached_result)
+                result["meta"]["cache_hit"] = True
+                result["meta"]["took_ms"] = int((time.time() - start) * 1000)
+                return result
+        except Exception as e:
+            # If cache fails, continue with normal flow
+            print(f"Cache read error: {e}")
+    
+    # Detect search intent (cache this separately)
+    intent_cache_key = _get_cache_key("intent", q_lower)
+    intent_data = None
+    
+    if redis:
+        try:
+            cached_intent = await redis.get(intent_cache_key)
+            if cached_intent:
+                intent_data = json.loads(cached_intent)
+        except Exception:
+            pass
+    
+    # If not cached, detect intent
+    if not intent_data:
+        intent_data = IntentDetector.detect_intent(q_lower)
+        # Cache intent for 1 hour
+        if redis:
+            try:
+                await redis.setex(
+                    intent_cache_key,
+                    3600,
+                    json.dumps(intent_data)
+                )
+            except Exception:
+                pass
+    
     primary_intent = intent_data['primary_intent']
     intent_confidence = intent_data['intent_confidence']
     preferred_content_type = IntentDetector.get_best_content_type_for_intent(primary_intent)
     
-    # Build content type filter if specified
+    # Build content type filter
     content_type_filter = ""
     if content_types:
-        types_list = [f"'{t.strip()}'" for t in content_types.split(',')]
-        content_type_filter = f"AND cc.content_type IN ({','.join(types_list)})" 
+        valid_types = {'text_article', 'manga', 'video', 'image', 'forum', 'tool', 'unknown'}
+        types_list = [
+            f"'{t.strip()}'" for t in content_types.split(',')
+            if t.strip() in valid_types
+        ]
+        if types_list:
+            content_type_filter = f"AND cc.content_type IN ({','.join(types_list)})" 
     
-    # Build tracker risk filter if specified
+    # Build tracker risk filter
     tracker_risk_filter = ""
     if filter_tracker_risk:
         risk_thresholds = {
@@ -47,7 +106,7 @@ async def search(
         threshold = risk_thresholds.get(filter_tracker_risk, 0.0)
         tracker_risk_filter = f"AND p.tracker_risk_score >= {threshold}"
     
-    # Enhanced Ranking Query with Content + Intent + Tracker Integration
+    # Enhanced ranking query
     query_sql = text("""
         WITH scored AS (
             SELECT 
@@ -58,13 +117,11 @@ async def search(
                 cc.content_type, cc.type_confidence,
                 ic.primary_intent, ic.intent_confidence as intent_db_confidence,
                 
-                -- Base PGroonga relevance
                 pgroonga_score(p.tableoid, p.ctid) AS pgroonga_relevance,
                 
-                -- Component Scores
-                CASE WHEN LOWER(p.title) LIKE '%' || :q_lower || '%' THEN 10 ELSE 0 END AS title_bonus,
-                CASE WHEN LOWER(p.url) LIKE '%' || :q_lower || '%' THEN 6 ELSE 0 END AS url_bonus,
-                CASE WHEN LOWER(COALESCE(p.h1, '')) LIKE '%' || :q_lower || '%' THEN 8 ELSE 0 END AS h1_bonus,
+                CASE WHEN LOWER(p.title) LIKE :q_pattern THEN 10 ELSE 0 END AS title_bonus,
+                CASE WHEN LOWER(p.url) LIKE :q_pattern THEN 6 ELSE 0 END AS url_bonus,
+                CASE WHEN LOWER(COALESCE(p.h1, '')) LIKE :q_pattern THEN 8 ELSE 0 END AS h1_bonus,
                 CASE WHEN LOWER(p.title) = :q_lower THEN 5 ELSE 0 END AS exact_bonus,
                 
                 GREATEST(0, 10 - EXTRACT(DAY FROM NOW() - p.last_crawled_at) * 0.1) AS freshness_score,
@@ -75,15 +132,11 @@ async def search(
                     ELSE 0
                 END AS quality_score,
                 
-                p.pagerank_score * 0.5 AS pagerank_contribution,
-                LN(1 + p.click_score) * 0.3 AS click_contribution,
+                COALESCE(p.pagerank_score, 0) * 0.5 AS pagerank_contribution,
+                LN(1 + COALESCE(p.click_score, 0)) * 0.3 AS click_contribution,
                 
-                -- NEW: Tracker Risk Score (0.1-1.0, higher is better)
-                -- Factor: reduces score for high-risk pages
                 (1.0 - 0.3 * (1.0 - COALESCE(p.tracker_risk_score, 1.0))) AS tracker_factor,
                 
-                -- NEW: Content-Intent Match Score (0.0-1.0)
-                -- Bonus if content type matches search intent
                 CASE 
                     WHEN cc.content_type IS NULL THEN 0.5
                     WHEN cc.content_type = :preferred_content_type THEN 1.0
@@ -108,7 +161,6 @@ async def search(
         )
         SELECT 
             *,
-            -- Final Score: Base Score * Tracker Factor * Content-Intent Match
             (
                 (
                     pgroonga_relevance * 1.5 +
@@ -121,27 +173,31 @@ async def search(
                     quality_score +
                     pagerank_contribution +
                     click_contribution +
-                    (intent_match_bonus * 2.0)  -- Boost content-intent match
+                    (intent_match_bonus * 2.0)
                 ) * trust_score
-                * tracker_factor  -- Apply tracker penalty
+                * tracker_factor
             ) AS total_score
         FROM scored
         ORDER BY total_score DESC
         LIMIT :limit OFFSET :offset
     """)
 
-    result = await db.execute(
-        query_sql, 
-        {
-            "q": q, 
-            "q_lower": q_lower, 
-            "limit": limit, 
-            "offset": offset,
-            "primary_intent": primary_intent,
-            "preferred_content_type": preferred_content_type,
-        }
-    )
-    rows = result.fetchall()
+    try:
+        result = await db.execute(
+            query_sql, 
+            {
+                "q": q, 
+                "q_lower": q_lower,
+                "q_pattern": f"%{q_lower}%",
+                "limit": limit, 
+                "offset": offset,
+                "primary_intent": primary_intent,
+                "preferred_content_type": preferred_content_type,
+            }
+        )
+        rows = result.fetchall()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database query error: {str(e)}")
 
     took_ms = int((time.time() - start) * 1000)
     data = []
@@ -149,9 +205,9 @@ async def search(
     for row in rows:
         item = {
             "id": row.id,
-            "title": row.title,
+            "title": row.title or "No title",
             "url": row.url,
-            "score": row.total_score,
+            "score": float(row.total_score),
             "domain": row.domain,
             "favicon": row.favicon_url,
             "snippet": None,
@@ -160,60 +216,59 @@ async def search(
                 "description": row.og_description,
                 "image": row.og_image_url,
             },
-            # NEW: Content & Intent metadata
-            "content_type": row.content_type,
+            "content_type": row.content_type or "unknown",
             "content_confidence": float(row.type_confidence) if row.type_confidence else None,
             "tracker_risk_score": float(row.tracker_risk_score) if row.tracker_risk_score else 1.0,
         }
         
-        # Add Explain Data if requested
         if explain:
             item["explain"] = {
-                "pgroonga_base": row.pgroonga_relevance,
-                "title_bonus": row.title_bonus,
-                "url_bonus": row.url_bonus,
-                "h1_bonus": row.h1_bonus,
-                "exact_bonus": row.exact_bonus,
-                "freshness": row.freshness_score,
-                "quality": row.quality_score,
-                "pagerank": row.pagerank_contribution,
-                "click_bonus": row.click_contribution,
-                "domain_trust_multiplier": row.trust_score,
-                # NEW: Additional factors
-                "tracker_factor": row.tracker_factor,
-                "intent_match_bonus": row.intent_match_bonus,
-                "tracker_risk_score": row.tracker_risk_score,
+                "pgroonga_base": float(row.pgroonga_relevance),
+                "title_bonus": float(row.title_bonus),
+                "url_bonus": float(row.url_bonus),
+                "h1_bonus": float(row.h1_bonus),
+                "exact_bonus": float(row.exact_bonus),
+                "freshness": float(row.freshness_score),
+                "quality": float(row.quality_score),
+                "pagerank": float(row.pagerank_contribution),
+                "click_bonus": float(row.click_contribution),
+                "domain_trust_multiplier": float(row.trust_score),
+                "tracker_factor": float(row.tracker_factor),
+                "intent_match_bonus": float(row.intent_match_bonus),
+                "tracker_risk_score": float(row.tracker_risk_score),
             }
         
         data.append(item)
 
-    # Log query with intent data
-    async with db.begin():
-        qres = await db.execute(
-            text("""
-                INSERT INTO search_queries 
-                (query, took_ms, results_count, primary_intent, intent_confidence) 
-                VALUES (:q, :t, :c, :intent, :intent_conf) 
-                RETURNING id
-            """),
-            {
-                "q": q, 
-                "t": took_ms, 
-                "c": len(data),
-                "intent": primary_intent,
-                "intent_conf": intent_confidence,
-            },
-        )
-        query_id = qres.scalar()
+    # Log search query
+    try:
+        async with db.begin():
+            await db.execute(
+                text("""
+                    INSERT INTO search_queries 
+                    (query, took_ms, results_count, primary_intent, intent_confidence) 
+                    VALUES (:q, :t, :c, :intent, :intent_conf)
+                """),
+                {
+                    "q": q, 
+                    "t": took_ms, 
+                    "c": len(data),
+                    "intent": primary_intent,
+                    "intent_conf": intent_confidence,
+                },
+            )
+    except Exception:
+        # If query logging fails, continue anyway
+        pass
 
-    return {
+    response = {
         "meta": {
-            "query_id": query_id,
+            "query_id": None,
             "query": q,
             "took_ms": took_ms,
             "count": len(data),
             "explain_mode": explain,
-            # NEW: Intent detection info
+            "cache_hit": False,
             "intent": {
                 "primary": primary_intent,
                 "confidence": intent_confidence,
@@ -222,10 +277,23 @@ async def search(
         },
         "data": data,
     }
+    
+    # Cache successful result for 5 minutes
+    if redis and len(data) > 0:
+        try:
+            await redis.setex(
+                cache_key,
+                300,
+                json.dumps(response, default=str)
+            )
+        except Exception:
+            pass
+    
+    return response
 
 
 @router.get("/search/debug/intent")
-async def debug_intent(q: str = Query(..., description="Query to analyze")):
+async def debug_intent(q: str = Query(..., min_length=1, max_length=500)):
     """Debug endpoint to test intent detection."""
     intent_data = IntentDetector.detect_intent(q)
     best_content = IntentDetector.get_best_content_type_for_intent(intent_data['primary_intent'])
@@ -257,70 +325,99 @@ async def debug_intent(q: str = Query(..., description="Query to analyze")):
 @router.get("/search/debug/tracker-risk")
 async def debug_tracker_risk(db: AsyncSession = Depends(get_db)):
     """Debug endpoint to check tracker risk distribution."""
-    result = await db.execute(
-        text("""
-            SELECT 
-                CASE 
-                    WHEN tracker_risk_score >= 0.9 THEN 'clean'
-                    WHEN tracker_risk_score >= 0.7 THEN 'minimal'
-                    WHEN tracker_risk_score >= 0.5 THEN 'moderate'
-                    WHEN tracker_risk_score >= 0.3 THEN 'heavy'
-                    ELSE 'severe'
-                END as risk_category,
-                COUNT(*) as count,
-                ROUND(AVG(tracker_risk_score)::numeric, 3) as avg_score,
-                ROUND(MIN(tracker_risk_score)::numeric, 3) as min_score,
-                ROUND(MAX(tracker_risk_score)::numeric, 3) as max_score
-            FROM pages
-            WHERE tracker_risk_score IS NOT NULL
-            GROUP BY risk_category
-            ORDER BY avg_score DESC
-        """)
-    )
-    
-    rows = result.fetchall()
-    return {
-        "distribution": [
-            {
-                "category": row.risk_category,
-                "count": row.count,
-                "avg_score": row.avg_score,
-                "min_score": row.min_score,
-                "max_score": row.max_score,
-            }
-            for row in rows
-        ]
-    }
+    try:
+        result = await db.execute(
+            text("""
+                SELECT 
+                    CASE 
+                        WHEN tracker_risk_score >= 0.9 THEN 'clean'
+                        WHEN tracker_risk_score >= 0.7 THEN 'minimal'
+                        WHEN tracker_risk_score >= 0.5 THEN 'moderate'
+                        WHEN tracker_risk_score >= 0.3 THEN 'heavy'
+                        ELSE 'severe'
+                    END as risk_category,
+                    COUNT(*) as count,
+                    ROUND(AVG(tracker_risk_score)::numeric, 3) as avg_score,
+                    ROUND(MIN(tracker_risk_score)::numeric, 3) as min_score,
+                    ROUND(MAX(tracker_risk_score)::numeric, 3) as max_score
+                FROM pages
+                WHERE tracker_risk_score IS NOT NULL
+                GROUP BY risk_category
+                ORDER BY avg_score DESC
+            """)
+        )
+        rows = result.fetchall()
+        return {
+            "distribution": [
+                {
+                    "category": row.risk_category,
+                    "count": row.count,
+                    "avg_score": float(row.avg_score),
+                    "min_score": float(row.min_score),
+                    "max_score": float(row.max_score),
+                }
+                for row in rows
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
 
 
 @router.get("/search/debug/content-types")
 async def debug_content_types(db: AsyncSession = Depends(get_db)):
     """Debug endpoint to check content type distribution."""
-    result = await db.execute(
-        text("""
-            SELECT 
-                content_type,
-                COUNT(*) as count,
-                ROUND(AVG(type_confidence)::numeric, 3) as avg_confidence,
-                ROUND(MIN(type_confidence)::numeric, 3) as min_confidence,
-                ROUND(MAX(type_confidence)::numeric, 3) as max_confidence
-            FROM content_classifications
-            WHERE content_type IS NOT NULL
-            GROUP BY content_type
-            ORDER BY count DESC
-        """)
-    )
+    try:
+        result = await db.execute(
+            text("""
+                SELECT 
+                    content_type,
+                    COUNT(*) as count,
+                    ROUND(AVG(type_confidence)::numeric, 3) as avg_confidence,
+                    ROUND(MIN(type_confidence)::numeric, 3) as min_confidence,
+                    ROUND(MAX(type_confidence)::numeric, 3) as max_confidence
+                FROM content_classifications
+                WHERE content_type IS NOT NULL
+                GROUP BY content_type
+                ORDER BY count DESC
+            """)
+        )
+        rows = result.fetchall()
+        return {
+            "distribution": [
+                {
+                    "content_type": row.content_type,
+                    "count": row.count,
+                    "avg_confidence": float(row.avg_confidence),
+                    "min_confidence": float(row.min_confidence),
+                    "max_confidence": float(row.max_confidence),
+                }
+                for row in rows
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
+
+
+@router.post("/search/cache/invalidate")
+async def invalidate_cache(redis=Depends(get_redis_client)):
+    """Invalidate all search cache."""
+    if not redis:
+        raise HTTPException(status_code=503, detail="Redis not available")
     
-    rows = result.fetchall()
-    return {
-        "distribution": [
-            {
-                "content_type": row.content_type,
-                "count": row.count,
-                "avg_confidence": row.avg_confidence,
-                "min_confidence": row.min_confidence,
-                "max_confidence": row.max_confidence,
-            }
-            for row in rows
-        ]
-    }
+    try:
+        # Delete all search:* keys
+        keys = await redis.keys("search:*")
+        if keys:
+            await redis.delete(*keys)
+        
+        # Delete all intent:* keys
+        intent_keys = await redis.keys("intent:*")
+        if intent_keys:
+            await redis.delete(*intent_keys)
+        
+        return {
+            "status": "success",
+            "message": f"Invalidated {len(keys) + len(intent_keys)} cache entries"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cache invalidation error: {str(e)}")
