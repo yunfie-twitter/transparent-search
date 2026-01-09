@@ -17,6 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from utils.url_normalizer import normalize_url, is_valid_url
 from utils.text_processor import clean_html_text, tokenize_with_mecab
+from utils.tracker_detector import TrackerDetector
+from utils.content_classifier import ContentClassifier
+from utils.intent_detector import IntentDetector
 
 # Configuration
 DATABASE_URL = os.getenv(
@@ -65,10 +68,8 @@ async def fetch_with_retry(
             if resp.status_code == 200:
                 return resp
             elif resp.status_code in (301, 302, 303, 307, 308):
-                # Should be handled by follow_redirects, but just in case
                 continue
             else:
-                # 4xx, 5xx
                 return None
         except (httpx.TimeoutException, httpx.ConnectError):
             if attempt < max_retries - 1:
@@ -193,7 +194,6 @@ def extract_metadata(soup: BeautifulSoup, url: str) -> Dict:
     if h1_tags:
         h1_text = " ".join([h.get_text(strip=True) for h in h1_tags])
     else:
-        # Fallback to title if no h1 found (essential for scoring)
         h1_text = title
     
     # Remove script/style
@@ -222,9 +222,7 @@ def extract_metadata(soup: BeautifulSoup, url: str) -> Dict:
             continue
         abs_url = urljoin(url, href)
         if is_valid_url(abs_url):
-            # Normalize immediately to ensure consistency
             norm_url = normalize_url(abs_url)
-            # Prioritize same domain
             is_same_domain = urlparse(norm_url).netloc == domain
             links.append((norm_url, is_same_domain))
     
@@ -240,16 +238,17 @@ def extract_metadata(soup: BeautifulSoup, url: str) -> Dict:
         "links": links,
     }
 
-async def upsert_page(session: AsyncSession, site_id: int, url: str, metadata: Dict) -> int:
-    """Insert or update page."""
+async def upsert_page(session: AsyncSession, site_id: int, url: str, metadata: Dict, tracker_risk: float = 1.0) -> int:
+    """Insert or update page with tracker risk score."""
     result = await session.execute(
         text("""
             INSERT INTO pages (
                 url, site_id, title, h1, content,
                 og_title, og_description, og_image_url, jsonld,
+                tracker_risk_score,
                 last_crawled_at
             )
-            VALUES (:url, :site_id, :title, :h1, :content, :og_title, :og_desc, :og_img, :jsonld, NOW())
+            VALUES (:url, :site_id, :title, :h1, :content, :og_title, :og_desc, :og_img, :jsonld, :tracker_risk, NOW())
             ON CONFLICT (url) DO UPDATE
             SET site_id = EXCLUDED.site_id,
                 title = EXCLUDED.title,
@@ -259,6 +258,7 @@ async def upsert_page(session: AsyncSession, site_id: int, url: str, metadata: D
                 og_description = EXCLUDED.og_description,
                 og_image_url = EXCLUDED.og_image_url,
                 jsonld = EXCLUDED.jsonld,
+                tracker_risk_score = EXCLUDED.tracker_risk_score,
                 last_crawled_at = NOW()
             RETURNING id
         """),
@@ -272,6 +272,7 @@ async def upsert_page(session: AsyncSession, site_id: int, url: str, metadata: D
             "og_desc": metadata["og_description"],
             "og_img": metadata["og_image"],
             "jsonld": json.dumps(metadata["jsonld"]) if metadata["jsonld"] else None,
+            "tracker_risk": tracker_risk,
         },
     )
     return result.scalar()
@@ -306,7 +307,7 @@ async def crawl_recursive(
     concurrency: int = 5,
     recrawl_days: int = 7,
 ):
-    """Advanced recursive crawler with MeCab tokenization enabled by default."""
+    """Advanced recursive crawler with trackers, content type, and intent detection."""
     domain = urlparse(start_url).netloc
     base = f"{urlparse(start_url).scheme}://{domain}"
     
@@ -321,7 +322,7 @@ async def crawl_recursive(
         effective_delay = rules.crawl_delay or CRAWL_DELAY
         
         print(f"[*] Crawl delay: {effective_delay}s")
-        print(f"[*] MeCab tokenization: ENABLED")
+        print(f"[*] Features: Tracker Detection, Content Classification, Intent Detection")
         
         # Seed from sitemap
         seeds = [normalize_url(start_url)]
@@ -355,13 +356,12 @@ async def crawl_recursive(
                 path = urlparse(url).path or "/"
                 if not rules.is_allowed(path):
                     stats.total_skipped += 1
-                    print(f"[SKIP] Disallowed by robots.txt: {url}")
+                    print(f"[SKIP] Robots.txt: {url}")
                     return []
                 
                 # Recrawl check
                 if normalize_url(url) in recent_urls:
                     stats.total_skipped += 1
-                    print(f"[SKIP] Recently crawled: {url}")
                     return []
                 
                 resp = await fetch_with_retry(client, url)
@@ -374,7 +374,6 @@ async def crawl_recursive(
                 content_type = resp.headers.get("content-type", "")
                 if "text/html" not in content_type:
                     stats.total_skipped += 1
-                    print(f"[SKIP] Non-HTML: {url}")
                     return []
                 
                 # Charset detection
@@ -387,15 +386,25 @@ async def crawl_recursive(
                 soup = BeautifulSoup(html, "lxml")
                 metadata = extract_metadata(soup, url)
                 
-                # Save to DB
+                # NEW: Detect trackers
+                tracker_result = await TrackerDetector.detect_trackers(html, url)
+                tracker_risk_score = tracker_result['tracker_risk_score']
+                
+                # Save to DB with enhanced data
                 async with AsyncSession(engine) as session:
                     async with session.begin():
                         site_id = await register_site(session, domain, base)
-                        page_id = await upsert_page(session, site_id, url, metadata)
+                        page_id = await upsert_page(session, site_id, url, metadata, tracker_risk_score)
                         await save_images(session, page_id, metadata["images"])
+                        
+                        # NEW: Store tracker info
+                        await TrackerDetector.store_trackers(session, page_id, tracker_result['trackers'])
+                        
+                        # NEW: Classify content type
+                        await ContentClassifier.classify(html, url, page_id, session)
                 
                 stats.total_success += 1
-                print(f"[OK] {stats.total_success}/{max_pages} (depth={depth}) {url}")
+                print(f"[OK] {stats.total_success}/{max_pages} (depth={depth}) {url} | Trackers: {tracker_result['tracker_count']} | Risk: {tracker_result['risk_profile']}")
                 
                 # Extract links for next level
                 new_links = []
@@ -403,7 +412,6 @@ async def crawl_recursive(
                     for link, is_same in metadata["links"]:
                         norm = normalize_url(link)
                         if norm not in seen and is_valid_url(norm):
-                            # Prioritize same domain
                             if is_same:
                                 new_links.append((norm, depth + 1))
                             seen.add(norm)
