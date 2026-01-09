@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS sites (
     favicon_url TEXT,
     robots_txt_url TEXT,
     sitemap_url TEXT,
+    trust_score DOUBLE PRECISION DEFAULT 1.0, -- Added: Domain Trust Rank
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS images (
     alt_text TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS pgroonga_images_index ON images USING pgroonga (alt_text); -- Added for Image Search
 
 -- 4. links (Link Relationships for PageRank)
 CREATE TABLE IF NOT EXISTS links (

@@ -16,17 +16,40 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   api:
     build: ./app
     ports:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://user:password@db/search_engine
+      REDIS_URL: redis://redis:6379
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_started
     volumes:
-      - ./app:/code # Hot reload
+      - ./app:/code
+
+  worker:
+    build: ./app
+    command: ["arq", "worker.WorkerSettings"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://user:password@db/search_engine
+      REDIS_URL: redis://redis:6379
+      CRAWLER_UA: "TransparentSearchBot/1.0"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./app:/code
 
 volumes:
   pg_data:
