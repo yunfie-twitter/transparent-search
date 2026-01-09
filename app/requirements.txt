@@ -5,3 +5,4 @@ asyncpg
 httpx
 beautifulsoup4
 lxml
+cloudscraper
