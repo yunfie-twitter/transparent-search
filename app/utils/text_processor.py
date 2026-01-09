@@ -1,80 +1,49 @@
 import re
-import unicodedata
 from typing import List
 
 # Japanese stopwords (minimal set)
 JAPANESE_STOPWORDS = set([
     "の", "に", "は", "を", "た", "が", "で", "て", "と", "し", "れ",
     "さ", "ある", "いる", "も", "する", "から", "な", "こと", "として",
-    "い", "や", "など", "なっ", "ない", "この", "ため",
+    "い", "や", "など", "なっ", "など", "ない", "この", "ため"
 ])
-
-_WORD_RE = re.compile(r"[\w\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]+")
-
 
 def clean_html_text(text: str) -> str:
     """Remove HTML artifacts, normalize whitespace."""
-    text = re.sub(r"\s+", " ", text)
+    # Remove extra whitespace
+    text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-
-def normalize_query(query: str) -> str:
-    """Normalize query:
-    - NFKC (fullwidth/halfwidth normalization)
-    - lowercase
-    - normalize whitespace
-    """
-    query = unicodedata.normalize("NFKC", query)
-    query = query.lower().strip()
-    query = re.sub(r"\s+", " ", query)
-    return query
-
-
-def _filter_tokens(tokens: List[str]) -> List[str]:
-    out = []
-    for t in tokens:
-        t = t.strip()
-        if len(t) < 2:
-            continue
-        if t in JAPANESE_STOPWORDS:
-            continue
-        out.append(t)
-    return out
-
-
 def simple_tokenize(text: str) -> List[str]:
-    """Fallback tokenizer: extract word-ish sequences and keep 2+ chars."""
-    text = normalize_query(text)
-    tokens = _WORD_RE.findall(text)
-    return _filter_tokens(tokens)
-
+    """Simple tokenizer: split by whitespace and extract 2+ char tokens.
+    For Japanese, this is very naive. For production, use MeCab.
+    """
+    # Remove symbols
+    text = re.sub(r'[\r\n\t]+', ' ', text)
+    # Keep alphanumeric and Japanese characters
+    tokens = re.findall(r'[\w\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]+', text)
+    # Filter by length
+    tokens = [t for t in tokens if len(t) >= 2]
+    # Remove stopwords
+    tokens = [t for t in tokens if t.lower() not in JAPANESE_STOPWORDS]
+    return tokens
 
 def tokenize_with_mecab(text: str) -> List[str]:
-    """Tokenize Japanese text using MeCab + unidic-lite (default enabled).
-
-    If MeCab fails for any reason, fallback to simple_tokenize.
-    """
-    text = normalize_query(text)
-
+    """Tokenize Japanese text using MeCab (default enabled)."""
     try:
         import MeCab
-        try:
-            import unidic_lite
-            dicdir = unidic_lite.DICDIR
-            tagger = MeCab.Tagger(f"-d {dicdir} -Owakati")
-        except Exception:
-            tagger = MeCab.Tagger("-Owakati")
-
-        parsed = tagger.parse(text)
-        if not parsed:
-            return simple_tokenize(text)
-        tokens = parsed.strip().split()
-        return _filter_tokens(tokens)
-
+        tagger = MeCab.Tagger("-Owakati")
+        result = tagger.parse(text).strip()
+        tokens = result.split()
+        # Remove stopwords
+        tokens = [t for t in tokens if t not in JAPANESE_STOPWORDS and len(t) >= 2]
+        return tokens
     except Exception:
+        # Fallback to simple tokenizer
         return simple_tokenize(text)
 
-
-def tokenize(text: str) -> List[str]:
-    """Default tokenizer (MeCab enabled)."""
-    return tokenize_with_mecab(text)
+def normalize_query(query: str) -> str:
+    """Normalize search query: lowercase, remove extra spaces."""
+    query = query.lower().strip()
+    query = re.sub(r'\s+', ' ', query)
+    return query

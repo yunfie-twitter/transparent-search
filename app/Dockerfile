@@ -2,12 +2,14 @@ FROM python:3.12-slim
 
 WORKDIR /code
 
-# MeCab is enabled by default (mecab-python3 + unidic-lite).
-# Install system libraries for MeCab to ensure runtime availability.
+# Install system dependencies for MeCab
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    g++ \
+    make \
     mecab \
     libmecab-dev \
+    mecab-ipadic-utf8 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -15,4 +17,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Default command runs the API
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

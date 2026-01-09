@@ -2,183 +2,119 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from ..database import get_db
-from ..utils.text_processor import normalize_query, tokenize
-import re
 import time
 
 router = APIRouter()
 
-
-def _make_snippet(content: str | None, tokens: list[str], radius: int = 60) -> str | None:
-    if not content:
-        return None
-    content = re.sub(r"\s+", " ", content).strip()
-    if not content:
-        return None
-
-    lower = content.lower()
-    hit_pos = None
-    hit_token = None
-    for t in tokens:
-        p = lower.find(t.lower())
-        if p != -1:
-            hit_pos = p
-            hit_token = t
-            break
-
-    if hit_pos is None:
-        return content[: min(len(content), radius * 2)]
-
-    start = max(0, hit_pos - radius)
-    end = min(len(content), hit_pos + radius)
-    snippet = content[start:end]
-
-    # highlight all tokens
-    for t in sorted(set(tokens), key=len, reverse=True):
-        snippet = re.sub(
-            re.escape(t),
-            lambda m: f"<mark>{m.group(0)}</mark>",
-            snippet,
-            flags=re.IGNORECASE,
-        )
-
-    if start > 0:
-        snippet = "…" + snippet
-    if end < len(content):
-        snippet = snippet + "…"
-
-    return snippet
-
-
 @router.get("/search")
-async def search(
-    q: str,
-    limit: int = 10,
-    offset: int = 0,
-    op: str = "or",  # "or" or "and"
-    db: AsyncSession = Depends(get_db),
-):
+async def search(q: str, limit: int = 10, offset: int = 0, db: AsyncSession = Depends(get_db)):
     if not q:
         raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
 
-    q_norm = normalize_query(q)
-    tokens = tokenize(q_norm)
-
-    # de-dup tokens but keep order
-    seen = set()
-    tokens = [t for t in tokens if not (t in seen or seen.add(t))]
-
-    if not tokens:
-        raise HTTPException(status_code=400, detail="No valid tokens extracted from query")
-
     start = time.time()
+    q_lower = q.lower()
 
-    mode_and = (op.lower() == "and")
-
-    query_score = text(
-        """
-        WITH q AS (
-            SELECT unnest(:tokens::text[]) AS t
-        ),
-        base AS (
-            SELECT
-                p.id,
-                p.title,
-                p.h1,
-                p.url,
-                p.content,
-                p.og_title,
-                p.og_description,
-                p.og_image_url,
-                p.last_crawled_at,
-
-                SUM(
-                    (CASE WHEN lower(COALESCE(p.title,'')) LIKE '%' || lower(t) || '%' THEN 10 ELSE 0 END)
-                  + (CASE WHEN lower(COALESCE(p.url,''))   LIKE '%' || lower(t) || '%' THEN  6 ELSE 0 END)
-                  + (CASE WHEN lower(COALESCE(p.h1,''))    LIKE '%' || lower(t) || '%' THEN  8 ELSE 0 END)
-                  + (
-                        (
-                            length(lower(COALESCE(p.content,'')))
-                          - length(replace(lower(COALESCE(p.content,'')), lower(t), ''))
-                        ) / GREATEST(length(t), 1)
-                    )
-                ) AS term_score,
-
-                BOOL_AND(
-                    lower(COALESCE(p.title,'')) LIKE '%' || lower(t) || '%'
-                    OR lower(COALESCE(p.h1,'')) LIKE '%' || lower(t) || '%'
-                    OR lower(COALESCE(p.url,'')) LIKE '%' || lower(t) || '%'
-                    OR lower(COALESCE(p.content,'')) LIKE '%' || lower(t) || '%'
-                ) AS all_terms_match,
-
-                BOOL_OR(
-                    lower(COALESCE(p.title,'')) LIKE '%' || lower(t) || '%'
-                    OR lower(COALESCE(p.h1,'')) LIKE '%' || lower(t) || '%'
-                    OR lower(COALESCE(p.url,'')) LIKE '%' || lower(t) || '%'
-                    OR lower(COALESCE(p.content,'')) LIKE '%' || lower(t) || '%'
-                ) AS any_terms_match
-
-            FROM pages p
-            CROSS JOIN q
-            GROUP BY p.id
+    # Additive Scoring Logic (SQL-based)
+    # - Title match: +10 per query word
+    # - URL match: +6 per query word
+    # - H1 match: +8 per query word
+    # - Body match: +1 per occurrence
+    # - Exact phrase in title: +5
+    # - Freshness: newer pages get bonus (days_old penalty capped at 10)
+    # - Content quality: short content penalty, long content bonus
+    # - PageRank: +0.5 * pagerank_score
+    # - Click score: +0.3 * LN(1 + click_score)
+    
+    query_primary = text("""
+        WITH scored AS (
+            SELECT 
+                id, title, url, h1, content,
+                og_title, og_description, og_image_url,
+                last_crawled_at,
+                -- Base PGroonga relevance
+                pgroonga_score(tableoid, ctid) AS pgroonga_relevance,
+                
+                -- Title bonus: +10 if query in title (case insensitive)
+                CASE WHEN LOWER(title) LIKE '%' || :q_lower || '%' THEN 10 ELSE 0 END AS title_bonus,
+                
+                -- URL bonus: +6 if query in URL
+                CASE WHEN LOWER(url) LIKE '%' || :q_lower || '%' THEN 6 ELSE 0 END AS url_bonus,
+                
+                -- H1 bonus: +8 if query in h1
+                CASE WHEN LOWER(COALESCE(h1, '')) LIKE '%' || :q_lower || '%' THEN 8 ELSE 0 END AS h1_bonus,
+                
+                -- Exact phrase bonus: +5
+                CASE WHEN LOWER(title) = :q_lower THEN 5 ELSE 0 END AS exact_bonus,
+                
+                -- Body match count (simplified: just check presence for now, PGroonga handles frequency)
+                pgroonga_score(tableoid, ctid) AS body_score,
+                
+                -- Freshness: penalize old pages (days since crawl, capped at 10)
+                GREATEST(0, 10 - EXTRACT(DAY FROM NOW() - last_crawled_at) * 0.1) AS freshness_score,
+                
+                -- Content quality
+                CASE 
+                    WHEN LENGTH(content) < 100 THEN -5
+                    WHEN LENGTH(content) > 1000 THEN 2
+                    ELSE 0
+                END AS quality_score,
+                
+                -- PageRank
+                pagerank_score * 0.5 AS pagerank_contribution,
+                
+                -- Click learning
+                LN(1 + click_score) * 0.3 AS click_contribution
+                
+            FROM pages
+            WHERE (title &@~ :q OR h1 &@~ :q OR content &@~ :q)
         )
-        SELECT
-            *,
+        SELECT 
+            id, title, url, og_title, og_description, og_image_url,
+            pgroonga_snippet_html(content, pgroonga_query_extract_keywords(:q)) AS snippet,
             (
-                term_score
-                + (CASE WHEN lower(COALESCE(title,'')) = lower(:q_norm) THEN 5 ELSE 0 END)
-                + (CASE
-                    WHEN last_crawled_at > now() - interval '7 days'  THEN 3
-                    WHEN last_crawled_at > now() - interval '30 days' THEN 1
-                    ELSE 0
-                  END)
-                + (CASE
-                    WHEN length(COALESCE(content,'')) < 100  THEN -5
-                    WHEN length(COALESCE(content,'')) > 1000 THEN  2
-                    ELSE 0
-                  END)
+                pgroonga_relevance * 1.5 +
+                title_bonus +
+                url_bonus +
+                h1_bonus +
+                exact_bonus +
+                body_score +
+                freshness_score +
+                quality_score +
+                pagerank_contribution +
+                click_contribution
             ) AS total_score
-        FROM base
-        WHERE (
-            CASE WHEN :mode_and THEN all_terms_match ELSE any_terms_match END
-        )
+        FROM scored
         ORDER BY total_score DESC
         LIMIT :limit OFFSET :offset
-        """
-    )
+    """)
 
-    result = await db.execute(
-        query_score,
-        {
-            "tokens": tokens,
-            "q_norm": q_norm,
-            "limit": limit,
-            "offset": offset,
-            "mode_and": mode_and,
-        },
-    )
+    result = await db.execute(query_primary, {"q": q, "q_lower": q_lower, "limit": limit, "offset": offset})
     rows = result.fetchall()
 
-    # Fuzzy fallback (typo) when no results
     used_fuzzy = False
     did_you_mean = None
 
+    # Fallback: pg_trgm fuzzy search on title when no results
     if len(rows) == 0:
         used_fuzzy = True
-        query_fuzzy = text(
-            """
-            SELECT id, title, h1, url, content, og_title, og_description, og_image_url, last_crawled_at,
-                   similarity(COALESCE(title,''), :q_norm) AS total_score
+        query_fuzzy = text("""
+            SELECT 
+                id, title, url,
+                (similarity(title, :q) * 1.2)
+                + (pagerank_score * 0.5)
+                + (LN(1 + click_score) * 0.3) AS total_score,
+                NULL::text AS snippet,
+                og_title, og_description, og_image_url
             FROM pages
-            WHERE title IS NOT NULL AND similarity(title, :q_norm) > 0.2
-            ORDER BY similarity(title, :q_norm) DESC
+            WHERE title IS NOT NULL
+              AND similarity(title, :q) > 0.2
+            ORDER BY similarity(title, :q) DESC
             LIMIT :limit OFFSET :offset
-            """
-        )
-        result2 = await db.execute(
-            query_fuzzy, {"q_norm": q_norm, "limit": limit, "offset": offset}
-        )
+        """)
+        result2 = await db.execute(query_fuzzy, {"q": q, "limit": limit, "offset": offset})
         rows = result2.fetchall()
+
+        # Lightweight "did you mean" from best fuzzy hit
         if len(rows) > 0 and rows[0].title:
             did_you_mean = rows[0].title
 
@@ -186,15 +122,13 @@ async def search(
 
     data = []
     for row in rows:
-        snippet = _make_snippet(row.content, tokens)
         data.append(
             {
                 "id": row.id,
                 "title": row.title,
                 "url": row.url,
-                "updated_at": row.last_crawled_at,
-                "score": float(row.total_score) if row.total_score is not None else 0.0,
-                "snippet": snippet,
+                "score": row.total_score,
+                "snippet": row.snippet if hasattr(row, 'snippet') else None,
                 "og": {
                     "title": row.og_title,
                     "description": row.og_description,
@@ -209,7 +143,7 @@ async def search(
             text(
                 "INSERT INTO search_queries (query, took_ms, results_count) VALUES (:q, :t, :c) RETURNING id"
             ),
-            {"q": q_norm, "t": took_ms, "c": len(data)},
+            {"q": q, "t": took_ms, "c": len(data)},
         )
         query_id = qres.scalar()
 
@@ -220,8 +154,6 @@ async def search(
             "count": len(data),
             "used_fuzzy": used_fuzzy,
             "did_you_mean": did_you_mean,
-            "op": "and" if mode_and else "or",
-            "tokens": tokens,
         },
         "data": data,
     }

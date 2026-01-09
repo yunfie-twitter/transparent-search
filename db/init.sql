@@ -38,7 +38,6 @@ CREATE TABLE IF NOT EXISTS pages (
 -- Search indexes
 CREATE INDEX IF NOT EXISTS pgroonga_content_index ON pages USING pgroonga (title, h1, content);
 CREATE INDEX IF NOT EXISTS pages_title_trgm_idx ON pages USING gin (title gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS pages_h1_trgm_idx ON pages USING gin (h1 gin_trgm_ops);
 
 -- 3. images (Link Images to Pages)
 CREATE TABLE IF NOT EXISTS images (
