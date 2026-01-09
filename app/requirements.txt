@@ -7,6 +7,5 @@ beautifulsoup4
 lxml
 cloudscraper
 chardet
-# Optional: Uncomment for Japanese morphological analysis
-# mecab-python3
-# unidic-lite
+mecab-python3
+unidic-lite
