@@ -1,238 +1,263 @@
+"""Tracker Detection Module - Identify privacy-invasive scripts and services."""
+
 import re
-from typing import List, Dict, Tuple
-from bs4 import BeautifulSoup
-from sqlalchemy.ext.asyncio import AsyncSession
+import json
+from typing import Dict, List, Tuple, Optional
+from urllib.parse import urlparse
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+# Comprehensive tracker database
+TRACKER_DATABASE = {
+    # Analytics (Risk Level 2-3)
+    'google_analytics': {
+        'risk': 2,
+        'patterns': [r'google-analytics', r'ga\(', r'gtag\(', r'_gid', r'_ga'],
+    },
+    'gtag': {'risk': 2, 'patterns': [r'googletagmanager', r'gtag\(']},
+    'amplitude': {'risk': 2, 'patterns': [r'amplitude\.com', r'amplitude\(']},
+    'mixpanel': {'risk': 2, 'patterns': [r'mixpanel', r'mixpanel\.track']},
+    
+    # Advertising Networks (Risk Level 3-4)
+    'facebook_pixel': {
+        'risk': 4,
+        'patterns': [r'facebook\.com/tr', r'fbq\(', r'pixel', r'_fbp'],
+    },
+    'google_ads': {
+        'risk': 3,
+        'patterns': [r'google\.com/ads', r'pagead', r'gstatic\.com/ads'],
+    },
+    'criteo': {'risk': 3, 'patterns': [r'criteo\.com', r'criteo\.net']},
+    'twitter_pixel': {'risk': 3, 'patterns': [r'twitter\.com.*pixel', r'twq\(']},
+    'tiktok_pixel': {'risk': 3, 'patterns': [r'tiktok\.com.*pixel']},
+    
+    # Session Recording (Risk Level 5)
+    'hotjar': {
+        'risk': 5,
+        'patterns': [r'hotjar', r'hj\.']],
+    },
+    'fullstory': {
+        'risk': 5,
+        'patterns': [r'fullstory', r'_fs_', r'FS\.replaySession'],
+    },
+    'sessioncam': {
+        'risk': 5,
+        'patterns': [r'sessioncam', r'_scc'],
+    },
+    'smartlook': {
+        'risk': 5,
+        'patterns': [r'smartlook', r'smartlook\.com'],
+    },
+    
+    # Heatmaps (Risk Level 4)
+    'microsoft_clarity': {
+        'risk': 4,
+        'patterns': [r'clarity\.ms', r'clarity\('],
+    },
+    'contentsquare': {
+        'risk': 4,
+        'patterns': [r'contentsquare', r'contentsquarecdn'],
+    },
+    
+    # A/B Testing (Risk Level 2)
+    'optimizely': {'risk': 2, 'patterns': [r'optimizely', r'optimizely\.com']},
+    'convert': {'risk': 2, 'patterns': [r'convertkit', r'convertexperiments']},
+    
+    # CDN / Third-party (Risk Level 1)
+    'cloudflare': {'risk': 1, 'patterns': [r'cloudflare\.com']},
+    'cdn': {'risk': 1, 'patterns': [r'cdn', r'jsdelivr', r'unpkg']},
+}
+
 
 class TrackerDetector:
-    """
-    Detects tracking scripts and services on web pages.
-    Maintains a database of known trackers with risk levels.
-    """
-
-    # Known tracker domains with risk levels (1-5)
-    KNOWN_TRACKERS = {
-        # Analytics
-        'google-analytics.com': {'name': 'Google Analytics', 'category': 'analytics', 'risk': 2},
-        'googletagmanager.com': {'name': 'Google Tag Manager', 'category': 'analytics', 'risk': 2},
-        'segment.com': {'name': 'Segment', 'category': 'analytics', 'risk': 3},
-        'amplitude.com': {'name': 'Amplitude', 'category': 'analytics', 'risk': 2},
-        'mixpanel.com': {'name': 'Mixpanel', 'category': 'analytics', 'risk': 3},
-        
-        # Advertising
-        'doubleclick.net': {'name': 'Google Ads', 'category': 'advertising', 'risk': 4},
-        'facebook.com': {'name': 'Facebook Pixel', 'category': 'advertising', 'risk': 4},
-        'criteo.com': {'name': 'Criteo', 'category': 'advertising', 'risk': 4},
-        'amazon-adsystem.com': {'name': 'Amazon Ads', 'category': 'advertising', 'risk': 3},
-        
-        # Heatmap/Session Recording (highest privacy risk)
-        'hotjar.com': {'name': 'Hotjar', 'category': 'heatmap', 'risk': 5},
-        'fullstory.com': {'name': 'FullStory', 'category': 'heatmap', 'risk': 5},
-        'mouseflow.com': {'name': 'Mouseflow', 'category': 'heatmap', 'risk': 5},
-        'sessioncam.com': {'name': 'SessionCam', 'category': 'heatmap', 'risk': 5},
-        
-        # Social
-        'facebook.net': {'name': 'Facebook', 'category': 'social', 'risk': 4},
-        'twitter.com': {'name': 'Twitter', 'category': 'social', 'risk': 3},
-        'linkedin.com': {'name': 'LinkedIn', 'category': 'social', 'risk': 3},
-    }
+    """Detect privacy-invasive trackers on web pages."""
 
     @staticmethod
-    async def detect_trackers(html: str, page_url: str) -> Dict:
-        """
-        Detect all tracking scripts in HTML.
-        Returns dict with tracker list and risk score.
-        """
-        soup = BeautifulSoup(html, 'lxml')
-        detected_trackers = []
-        risk_sum = 0
-        risk_count = 0
-
-        # 1. Detect script tags
-        for script in soup.find_all('script'):
-            src = script.get('src', '')
-            if src:
-                tracker = TrackerDetector._check_tracker_url(src)
-                if tracker:
-                    detected_trackers.append({
-                        'domain': tracker['domain'],
-                        'name': tracker['name'],
-                        'category': tracker['category'],
-                        'risk': tracker['risk'],
-                        'method': 'script_src'
-                    })
-                    risk_sum += tracker['risk']
-                    risk_count += 1
-
-        # 2. Detect image pixels (tracking pixels)
-        for img in soup.find_all('img'):
-            src = img.get('src', '')
+    async def detect_trackers(html: str, url: str) -> Dict:
+        """Detect all trackers in HTML."""
+        trackers_found = []
+        
+        # Pattern 1: Script tags
+        script_pattern = r'<script[^>]*src=["\']?([^"\'>\s]+)'
+        for match in re.finditer(script_pattern, html, re.IGNORECASE):
+            src = match.group(1)
+            tracker = TrackerDetector._identify_tracker(src)
+            if tracker:
+                trackers_found.append({
+                    'name': tracker['name'],
+                    'risk': tracker['risk'],
+                    'type': 'script',
+                    'url': src,
+                })
+        
+        # Pattern 2: Inline scripts
+        inline_pattern = r'<script[^>]*>([^<]+)</script>'
+        for match in re.finditer(inline_pattern, html, re.IGNORECASE | re.DOTALL):
+            content = match.group(1)
+            tracker = TrackerDetector._identify_tracker_in_code(content)
+            if tracker:
+                trackers_found.append({
+                    'name': tracker['name'],
+                    'risk': tracker['risk'],
+                    'type': 'inline_script',
+                    'snippet': content[:100],
+                })
+        
+        # Pattern 3: Tracking pixels (1x1 images)
+        pixel_pattern = r'<img[^>]*src=["\']?([^"\'>\s]+)'
+        for match in re.finditer(pixel_pattern, html, re.IGNORECASE):
+            src = match.group(1)
             if 'pixel' in src.lower() or 'beacon' in src.lower():
-                tracker = TrackerDetector._check_tracker_url(src)
-                if tracker:
-                    detected_trackers.append({
-                        'domain': tracker['domain'],
-                        'name': tracker['name'],
-                        'category': tracker['category'],
-                        'risk': tracker['risk'],
-                        'method': 'img_pixel'
+                tracker = TrackerDetector._identify_tracker(src)
+                if tracker or 'pixel' in src.lower():
+                    trackers_found.append({
+                        'name': tracker['name'] if tracker else 'unknown_pixel',
+                        'risk': tracker['risk'] if tracker else 3,
+                        'type': 'pixel',
+                        'url': src,
                     })
-                    risk_sum += tracker['risk']
-                    risk_count += 1
-
-        # 3. Detect iframe embeds
-        for iframe in soup.find_all('iframe'):
-            src = iframe.get('src', '')
-            if src:
-                tracker = TrackerDetector._check_tracker_url(src)
-                if tracker:
-                    detected_trackers.append({
-                        'domain': tracker['domain'],
-                        'name': tracker['name'],
-                        'category': tracker['category'],
-                        'risk': tracker['risk'],
-                        'method': 'iframe'
-                    })
-                    risk_sum += tracker['risk']
-                    risk_count += 1
-
-        # 4. Detect inline script patterns
-        for script in soup.find_all('script'):
-            if script.string:
-                # Look for common tracker patterns
-                content = script.string
-                
-                # Google Analytics pattern
-                if 'ga(' in content or 'gtag(' in content:
-                    detected_trackers.append({
-                        'domain': 'google-analytics.com',
-                        'name': 'Google Analytics',
-                        'category': 'analytics',
-                        'risk': 2,
-                        'method': 'script_inline'
-                    })
-                    risk_sum += 2
-                    risk_count += 1
-                
-                # Facebook Pixel pattern
-                if 'fbq(' in content:
-                    detected_trackers.append({
-                        'domain': 'facebook.com',
-                        'name': 'Facebook Pixel',
-                        'category': 'advertising',
-                        'risk': 4,
-                        'method': 'script_inline'
-                    })
-                    risk_sum += 4
-                    risk_count += 1
-
-        # Calculate tracker risk score (0.5 = very risky, 1.0 = clean)
-        if risk_count == 0:
-            tracker_risk_score = 1.0
-        else:
-            avg_risk = risk_sum / risk_count
-            # Formula: 1.0 - (avg_risk / 5) with penalty for count
-            tracker_risk_score = max(0.1, 1.0 - (avg_risk / 5.0) - (min(0.2, risk_count * 0.05)))
-
-        # Deduplicate trackers
+        
+        # Pattern 4: iframes
+        iframe_pattern = r'<iframe[^>]*src=["\']?([^"\'>\s]+)'
+        for match in re.finditer(iframe_pattern, html, re.IGNORECASE):
+            src = match.group(1)
+            tracker = TrackerDetector._identify_tracker(src)
+            if tracker:
+                trackers_found.append({
+                    'name': tracker['name'],
+                    'risk': tracker['risk'],
+                    'type': 'iframe',
+                    'url': src,
+                })
+        
+        # Remove duplicates
         unique_trackers = {}
-        for t in detected_trackers:
-            key = t['domain']
+        for t in trackers_found:
+            key = (t['name'], t['type'])
             if key not in unique_trackers:
                 unique_trackers[key] = t
-
-        return {
-            'trackers': list(unique_trackers.values()),
-            'tracker_count': len(unique_trackers),
-            'tracker_risk_score': tracker_risk_score,
-            'risk_profile': TrackerDetector._get_risk_profile(tracker_risk_score)
-        }
-
-    @staticmethod
-    def _check_tracker_url(url: str) -> Dict or None:
-        """
-        Check if a URL matches known tracker domains.
-        """
-        from urllib.parse import urlparse
         
-        try:
-            domain = urlparse(url).netloc
-            domain_lower = domain.lower()
+        trackers_found = list(unique_trackers.values())
+        
+        # Calculate risk profile
+        if not trackers_found:
+            risk_profile = 'clean'
+            avg_risk = 1.0
+        else:
+            risks = [t['risk'] for t in trackers_found]
+            avg_risk = sum(risks) / len(risks)
             
-            # Direct match
-            if domain_lower in TrackerDetector.KNOWN_TRACKERS:
-                info = TrackerDetector.KNOWN_TRACKERS[domain_lower].copy()
-                info['domain'] = domain_lower
-                return info
-            
-            # Subdomain match
-            for tracker_domain, tracker_info in TrackerDetector.KNOWN_TRACKERS.items():
-                if domain_lower.endswith('.' + tracker_domain) or domain_lower == tracker_domain:
-                    info = tracker_info.copy()
-                    info['domain'] = tracker_domain
-                    return info
-        except:
-            pass
+            if avg_risk >= 4.5:
+                risk_profile = 'severe_tracking_risk'
+            elif avg_risk >= 3.5:
+                risk_profile = 'heavy_trackers'
+            elif avg_risk >= 2.5:
+                risk_profile = 'moderate_trackers'
+            elif avg_risk >= 1.5:
+                risk_profile = 'minimal_trackers'
+            else:
+                risk_profile = 'clean'
+        
+        # Calculate tracker risk score (0-1)
+        # Formula: score = 1.0 - (avg_risk / 5) - (tracker_count * 0.05)
+        risk_score = 1.0 - (avg_risk / 5) - (len(trackers_found) * 0.05)
+        risk_score = max(0.1, min(1.0, risk_score))  # Clamp to [0.1, 1.0]
+        
+        return {
+            'trackers': trackers_found,
+            'tracker_count': len(trackers_found),
+            'tracker_risk_score': risk_score,
+            'risk_profile': risk_profile,
+            'average_risk_level': avg_risk,
+        }
+    
+    @staticmethod
+    def _identify_tracker(url_or_code: str) -> Optional[Dict]:
+        """Identify tracker from URL or code snippet."""
+        for tracker_name, tracker_info in TRACKER_DATABASE.items():
+            for pattern in tracker_info.get('patterns', []):
+                if re.search(pattern, url_or_code, re.IGNORECASE):
+                    return {
+                        'name': tracker_name,
+                        'risk': tracker_info['risk'],
+                    }
+        return None
+    
+    @staticmethod
+    def _identify_tracker_in_code(code: str) -> Optional[Dict]:
+        """Identify tracker from inline JavaScript code."""
+        # Look for specific patterns like ga(, fbq(, gtag(, etc
+        patterns_to_check = [
+            (r'ga\(', 'google_analytics', 2),
+            (r'gtag\(', 'gtag', 2),
+            (r'fbq\(', 'facebook_pixel', 4),
+            (r'twq\(', 'twitter_pixel', 3),
+            (r'hj\(', 'hotjar', 5),
+            (r'_fs_\(', 'fullstory', 5),
+            (r'amplitude\.track', 'amplitude', 2),
+            (r'mixpanel\.track', 'mixpanel', 2),
+        ]
+        
+        for pattern, name, risk in patterns_to_check:
+            if re.search(pattern, code, re.IGNORECASE):
+                return {'name': name, 'risk': risk}
         
         return None
-
+    
     @staticmethod
-    def _get_risk_profile(score: float) -> str:
-        """
-        Categorize tracker risk score.
-        """
-        if score >= 0.9:
-            return 'clean'
-        elif score >= 0.7:
-            return 'minimal_trackers'
-        elif score >= 0.5:
-            return 'moderate_trackers'
-        elif score >= 0.3:
-            return 'heavy_trackers'
-        else:
-            return 'severe_tracking_risk'
-
-    @staticmethod
-    async def store_trackers(db: AsyncSession, page_id: int, trackers: List[Dict]):
-        """
-        Store detected trackers in database.
-        """
-        for tracker_info in trackers:
-            # Get or create tracker
-            result = await db.execute(
+    async def store_trackers(
+        session: AsyncSession, page_id: int, trackers: List[Dict]
+    ) -> None:
+        """Store detected trackers in database."""
+        # First, create/update tracker entries
+        for tracker in trackers:
+            # Insert or get tracker
+            result = await session.execute(
                 text("""
-                    SELECT id FROM trackers WHERE domain = :domain
+                    INSERT INTO trackers (name, risk_level)
+                    VALUES (:name, :risk)
+                    ON CONFLICT (name) DO UPDATE
+                    SET risk_level = EXCLUDED.risk_level
+                    RETURNING id
                 """),
-                {'domain': tracker_info['domain']}
+                {'name': tracker['name'], 'risk': tracker['risk']},
             )
             tracker_id = result.scalar()
             
-            if not tracker_id:
-                result = await db.execute(
-                    text("""
-                        INSERT INTO trackers (domain, name, category, risk_level)
-                        VALUES (:domain, :name, :category, :risk)
-                        RETURNING id
-                    """),
-                    {
-                        'domain': tracker_info['domain'],
-                        'name': tracker_info['name'],
-                        'category': tracker_info['category'],
-                        'risk': tracker_info['risk']
-                    }
-                )
-                tracker_id = result.scalar()
-            
-            # Link tracker to page
-            await db.execute(
+            # Link to page
+            await session.execute(
                 text("""
-                    INSERT INTO page_trackers (page_id, tracker_id, detection_method)
-                    VALUES (:page_id, :tracker_id, :method)
-                    ON CONFLICT DO NOTHING
+                    INSERT INTO page_trackers (page_id, tracker_id, type, url, snippet)
+                    VALUES (:page_id, :tracker_id, :type, :url, :snippet)
+                    ON CONFLICT (page_id, tracker_id, type) DO NOTHING
                 """),
                 {
                     'page_id': page_id,
                     'tracker_id': tracker_id,
-                    'method': tracker_info.get('method', 'unknown')
-                }
+                    'type': tracker.get('type', 'unknown'),
+                    'url': tracker.get('url', None),
+                    'snippet': tracker.get('snippet', None),
+                },
             )
+
+
+if __name__ == '__main__':
+    import asyncio
+    
+    test_html = """
+    <html>
+    <head>
+    <script async src="https://www.googletagmanager.com/gtag/js?id=GA_ID"></script>
+    <script>
+    gtag('config', 'GA_ID');
+    </script>
+    <script src="https://cdn.hotjar.com/hotjar.js"></script>
+    </head>
+    <body>
+    <img src="https://facebook.com/tr?id=...&pixel..." />
+    </body>
+    </html>
+    """
+    
+    result = asyncio.run(TrackerDetector.detect_trackers(test_html, 'https://example.com'))
+    print(json.dumps(result, indent=2))
