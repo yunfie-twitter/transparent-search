@@ -70,7 +70,7 @@ class ContentClassifier:
                 r"/listing/", r"amazon.com/", r"ebay.com"
             ],
             "content_patterns": [
-                r"price|\$[0-9]+|???", r"add.*?cart|buy.*?now",
+                r"price|\$[0-9]+|¥", r"add.*?cart|buy.*?now",
                 r"rating|star|review"
             ],
             "schema_patterns": ["Product", "Offer"]
@@ -204,4 +204,5 @@ class ContentClassifier:
         
         return results
 
-contentclassifier = ContentClassifier()
+
+content_classifier = ContentClassifier()
