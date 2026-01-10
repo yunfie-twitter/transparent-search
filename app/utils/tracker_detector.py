@@ -34,7 +34,7 @@ TRACKER_DATABASE = {
     # Session Recording (Risk Level 5)
     'hotjar': {
         'risk': 5,
-        'patterns': [r'hotjar', r'hj\.']],
+        'patterns': [r'hotjar', r'hj\.'],
     },
     'fullstory': {
         'risk': 5,
