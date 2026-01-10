@@ -1,0 +1,3 @@
+"""
+Transparent Search API package.
+"""
