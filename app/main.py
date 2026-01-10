@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from .routers import search, suggest, click, images, admin
+from .routers import search, suggest, click, images, admin, advanced_search
 from .db_init import init_db
 
 @asynccontextmanager
@@ -26,6 +26,7 @@ app.include_router(suggest.router)
 app.include_router(click.router)
 app.include_router(images.router, prefix="/search") # /search/images
 app.include_router(admin.router, prefix="/admin")
+app.include_router(advanced_search.router, prefix="/search")  # /search/fuzzy
 
 @app.get("/")
 async def root():
