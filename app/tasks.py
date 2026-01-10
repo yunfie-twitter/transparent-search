@@ -1,5 +1,5 @@
 import asyncio
-from advanced_crawler import crawl_recursive
+from .advanced_crawler import crawl_recursive
 
 async def crawl_domain_task(ctx, url: str, max_pages: int = 100, max_depth: int = 3):
     """
