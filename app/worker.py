@@ -1,6 +1,6 @@
 import asyncio
 from arq.connections import RedisSettings
-from tasks import crawl_domain_task
+from .tasks import crawl_domain_task
 
 async def startup(ctx):
     print("Worker starting...")
