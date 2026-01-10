@@ -21,7 +21,7 @@ async def search(
     limit: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0),
     explain: bool = Query(False),
-    filter_tracker_risk: Optional[str] = Query(None, regex="^(clean|minimal|moderate|heavy|severe)$"),
+    filter_tracker_risk: Optional[str] = Query(None, pattern="^(clean|minimal|moderate|heavy|severe)$"),
     content_types: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     redis = Depends(get_redis_client),
@@ -246,15 +246,13 @@ async def search(
             await db.execute(
                 text("""
                     INSERT INTO search_queries 
-                    (query, took_ms, results_count, primary_intent, intent_confidence) 
-                    VALUES (:q, :t, :c, :intent, :intent_conf)
+                    (query, took_ms, results_count) 
+                    VALUES (:q, :t, :c)
                 """),
                 {
                     "q": q, 
                     "t": took_ms, 
                     "c": len(data),
-                    "intent": primary_intent,
-                    "intent_conf": intent_confidence,
                 },
             )
     except Exception:
