@@ -2,6 +2,7 @@ version: '3.9'
 
 services:
   # PostgreSQL Database
+  # ⚠️ NOTE: Ports NOT exposed - only accessible within container network
   postgres:
     image: postgres:16-alpine
     container_name: transparent_search_db
@@ -9,8 +10,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: transparent_search
-    ports:
-      - "5432:5432"
+    # Removed: ports section - only accessible within transparent_network
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -22,11 +22,11 @@ services:
       - transparent_network
 
   # Redis Cache
+  # ⚠️ NOTE: Ports NOT exposed - only accessible within container network
   redis:
     image: redis:7-alpine
     container_name: transparent_search_cache
-    ports:
-      - "6379:6379"
+    # Removed: ports section - only accessible within transparent_network
     command: redis-server --appendonly yes --requirepass transparent_search
     volumes:
       - redis_data:/data
@@ -39,6 +39,7 @@ services:
       - transparent_network
 
   # FastAPI Application
+  # ✅ Only this service exposes a port (8000) to the host
   app:
     build:
       context: .
