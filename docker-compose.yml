@@ -1,62 +1,82 @@
+version: '3.9'
+
 services:
-  db:
-    image: groonga/pgroonga:3.1.5-alpine-16
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: transparent_search_db
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
-      POSTGRES_DB: ${POSTGRES_DB:-search_engine}
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: transparent_search
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-search_engine}"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - transparent_network
 
+  # Redis Cache
   redis:
     image: redis:7-alpine
+    container_name: transparent_search_cache
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass transparent_search
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - transparent_network
 
-  api:
+  # FastAPI Application
+  app:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "debug"]
+    container_name: transparent_search_app
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/transparent_search
+      REDIS_URL: redis://:transparent_search@redis:6379
+      ENVIRONMENT: development
+      LOG_LEVEL: INFO
     ports:
-      - "8080:8080"
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://user:password@db/search_engine}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      - "8000:8000"
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
       redis:
-        condition: service_started
-    volumes:
-      - ./app:/code/app
-      - ./db:/code/db
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: ["arq", "app.worker.WorkerSettings"]
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://user:password@db/search_engine}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-      CRAWLER_UA: ${CRAWLER_UA:-TransparentSearchBot/1.0}
-    depends_on:
-      db:
         condition: service_healthy
-      redis:
-        condition: service_started
     volumes:
-      - ./app:/code/app
-      - ./db:/code/db
+      - ./app:/app/app
+      - ./alembic:/app/alembic
+      - ./main.py:/app/main.py
+    command: >
+      bash -c "
+        echo '🚀 Running database migrations...' &&
+        alembic upgrade head &&
+        echo '✅ Migrations complete' &&
+        echo '🚀 Starting FastAPI server...' &&
+        uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+      "
+    networks:
+      - transparent_network
 
 volumes:
-  pg_data:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  transparent_network:
+    driver: bridge
