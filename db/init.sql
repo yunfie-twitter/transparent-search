@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS pages (
     -- Ranking features
     pagerank_score DOUBLE PRECISION DEFAULT 1.0,
     click_score DOUBLE PRECISION DEFAULT 0.0,
+    tracker_risk_score DOUBLE PRECISION DEFAULT 1.0,
 
     last_crawled_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -76,3 +77,34 @@ CREATE TABLE IF NOT EXISTS clicks (
     page_id INTEGER REFERENCES pages(id) ON DELETE CASCADE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 7. content_classifications (Content Type Classification)
+CREATE TABLE IF NOT EXISTS content_classifications (
+    id SERIAL PRIMARY KEY,
+    page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    content_type VARCHAR(50),
+    type_confidence DOUBLE PRECISION DEFAULT 0.5,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(page_id)
+);
+CREATE INDEX IF NOT EXISTS content_classifications_page_id_idx ON content_classifications(page_id);
+
+-- 8. query_clusters (Query Clustering for Intent)
+CREATE TABLE IF NOT EXISTS query_clusters (
+    id SERIAL PRIMARY KEY,
+    query_text VARCHAR(500),
+    cluster_hash VARCHAR(64),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS query_clusters_hash_idx ON query_clusters(cluster_hash);
+
+-- 9. intent_classifications (Query Intent Classification)
+CREATE TABLE IF NOT EXISTS intent_classifications (
+    id SERIAL PRIMARY KEY,
+    query_cluster_id INTEGER REFERENCES query_clusters(id) ON DELETE CASCADE,
+    primary_intent VARCHAR(50),
+    intent_confidence DOUBLE PRECISION DEFAULT 0.5,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(query_cluster_id)
+);
+CREATE INDEX IF NOT EXISTS intent_classifications_cluster_id_idx ON intent_classifications(query_cluster_id);
