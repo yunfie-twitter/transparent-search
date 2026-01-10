@@ -1,287 +1,207 @@
-"""Content Type Classifier - Automatically categorize page content."""
-
+"""Advanced content type classification."""
 import re
 from typing import Dict, Tuple
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-from bs4 import BeautifulSoup
-
+from urllib.parse import urlparse
 
 class ContentClassifier:
-    """Classify content type of web pages."""
+    """Classifies web content into specific types with confidence scores."""
     
-    CONTENT_TYPES = [
-        'text_article',
-        'manga',
-        'video',
-        'image',
-        'forum',
-        'tool',
-        'unknown',
-    ]
-    
-    @staticmethod
-    async def classify(html: str, url: str, page_id: int, session: AsyncSession) -> Dict:
-        """Classify page content type."""
-        soup = BeautifulSoup(html, 'lxml')
-        
-        # Calculate metrics
-        metrics = ContentClassifier._extract_metrics(soup, html)
-        
-        # Score each content type
-        scores = {
-            'text_article': ContentClassifier._score_article(metrics),
-            'manga': ContentClassifier._score_manga(metrics),
-            'video': ContentClassifier._score_video(metrics),
-            'image': ContentClassifier._score_image(metrics),
-            'forum': ContentClassifier._score_forum(metrics),
-            'tool': ContentClassifier._score_tool(metrics),
-        }
-        
-        # Find primary content type
-        primary_type = max(scores, key=scores.get)
-        confidence = scores[primary_type]
-        
-        # If confidence too low, mark as unknown
-        if confidence < 0.3:
-            primary_type = 'unknown'
-        
-        # Store in database
-        await session.execute(
-            text("""
-                INSERT INTO content_classifications (
-                    page_id, content_type, type_confidence,
-                    text_length, image_count, has_video,
-                    has_form, code_block_count, comment_indicators,
-                    has_toc, is_series,
-                    metrics_json
-                )
-                VALUES (
-                    :page_id, :type, :confidence,
-                    :text_len, :img_count, :has_video,
-                    :has_form, :code_count, :comment_count,
-                    :has_toc, :is_series,
-                    :metrics
-                )
-                ON CONFLICT (page_id) DO UPDATE
-                SET content_type = EXCLUDED.content_type,
-                    type_confidence = EXCLUDED.type_confidence,
-                    metrics_json = EXCLUDED.metrics_json
-            """),
-            {
-                'page_id': page_id,
-                'type': primary_type,
-                'confidence': confidence,
-                'text_len': metrics['text_length'],
-                'img_count': metrics['image_count'],
-                'has_video': metrics['has_video'],
-                'has_form': metrics['has_form'],
-                'code_count': metrics['code_block_count'],
-                'comment_count': metrics['comment_indicators'],
-                'has_toc': metrics['has_toc'],
-                'is_series': metrics['is_series'],
-                'metrics': str(metrics),
-            },
-        )
-        
-        return {
-            'content_type': primary_type,
-            'confidence': confidence,
-            'metrics': metrics,
-            'all_scores': scores,
-        }
-    
-    @staticmethod
-    def _extract_metrics(soup: BeautifulSoup, html: str) -> Dict:
-        """Extract metrics from page."""
-        # Text length
-        body = soup.body or soup
-        text_content = body.get_text()
-        text_length = len(re.sub(r'\s+', ' ', text_content).strip())
-        
-        # Images
-        images = soup.find_all('img')
-        image_count = len(images)
-        
-        # Video
-        has_video = bool(
-            soup.find('video') or
-            soup.find('iframe', src=re.compile(r'(youtube|vimeo|youtu\.be|nicovideo)')) or
-            re.search(r'<video', html, re.IGNORECASE)
-        )
-        
-        # Forms
-        has_form = bool(soup.find('form'))
-        
-        # Code blocks
-        code_blocks = soup.find_all('code')
-        code_block_count = len(code_blocks)
-        
-        # Comment indicators (user-generated content patterns)
-        comment_patterns = [
-            soup.find_all('comment'),
-            soup.find_all(class_=re.compile(r'comment|discussion|reply|feedback')),
-            re.findall(r'\bcomment\b', html, re.IGNORECASE),
-        ]
-        comment_indicators = sum(len(list(p)) for p in comment_patterns if p)
-        
-        # Table of contents
-        has_toc = bool(
-            soup.find(class_=re.compile(r'toc|table.of.contents|contents')) or
-            soup.find('nav') or
-            re.search(r'<nav[^>]*>(.*?)</nav>', html, re.IGNORECASE)
-        )
-        
-        # Series/continuation (prev/next links)
-        is_series = bool(
-            soup.find('a', rel=re.compile(r'prev|next')) or
-            soup.find('a', text=re.compile(r'^(prev|next|\u524d|\u6b21)', re.IGNORECASE)) or
-            re.search(r'(episode|chapter|part|\u8a71)', text_content, re.IGNORECASE)
-        )
-        
-        # Heading structure
-        headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-        heading_count = len(headings)
-        
-        # Links
-        links = soup.find_all('a')
-        link_count = len(links)
-        
-        # Blockquotes
-        blockquotes = soup.find_all('blockquote')
-        blockquote_count = len(blockquotes)
-        
-        return {
-            'text_length': text_length,
-            'image_count': image_count,
-            'has_video': has_video,
-            'has_form': has_form,
-            'code_block_count': code_block_count,
-            'comment_indicators': comment_indicators,
-            'has_toc': has_toc,
-            'is_series': is_series,
-            'heading_count': heading_count,
-            'link_count': link_count,
-            'blockquote_count': blockquote_count,
-            'image_ratio': image_count / max(1, heading_count) if heading_count > 0 else 0,
-        }
+    # Content type patterns
+    PATTERNS = {
+        "text_article": {
+            "url_patterns": [
+                r"/blog/", r"/article/", r"/post/", r"/news/",
+                r"/story/", r"/press/", r"/publication/"
+            ],
+            "content_patterns": [
+                r"<article", r"<main", r"<h1>.*?</h1>.*?<p>",
+                r"byline|author|published|article"
+            ],
+            "schema_patterns": ["Article", "NewsArticle", "BlogPosting"]
+        },
+        "video": {
+            "url_patterns": [
+                r"/video/", r"/watch", r"youtube.com/watch", 
+                r"vimeo.com", r"/video-", r"/v/"
+            ],
+            "content_patterns": [
+                r"<iframe.*?src=.*?(youtube|vimeo)",
+                r"<video", r"videojs", r"player"
+            ],
+            "schema_patterns": ["VideoObject"]
+        },
+        "image": {
+            "url_patterns": [
+                r"/gallery/", r"/images/", r"/photos/", r"/picture",
+                r"imgur.com", r"flick.com"
+            ],
+            "content_patterns": [
+                r"<img[^>]+src=.*?\.(jpg|png|gif|webp)",
+                r"lightbox|photoswipe|gallery"
+            ],
+            "schema_patterns": ["ImageObject"]
+        },
+        "forum": {
+            "url_patterns": [
+                r"/forum/", r"/thread/", r"/discussion/", r"/topic/",
+                r"reddit.com", r"stackoverflow.com", r"github.com/issues"
+            ],
+            "content_patterns": [
+                r"comment|reply|post.*?user", r"upvote|downvote|vote",
+                r"<ul.*?class.*?comment"
+            ],
+            "schema_patterns": ["DiscussionForumPosting"]
+        },
+        "tool": {
+            "url_patterns": [
+                r"/app/", r"/tool", r"/calculator", r"/generator",
+                r"/converter", r"/api", r"/service"
+            ],
+            "content_patterns": [
+                r"<input[^>]+type.*?(text|number|file)",
+                r"<button[^>]+id=.*?submit|execute|generate",
+                r"api.example"
+            ],
+            "schema_patterns": ["SoftwareApplication"]
+        },
+        "product": {
+            "url_patterns": [
+                r"/product/", r"/shop/", r"/store/", r"/item/",
+                r"/listing/", r"amazon.com/", r"ebay.com"
+            ],
+            "content_patterns": [
+                r"price|\$[0-9]+|???", r"add.*?cart|buy.*?now",
+                r"rating|star|review"
+            ],
+            "schema_patterns": ["Product", "Offer"]
+        },
+        "documentation": {
+            "url_patterns": [
+                r"/docs/", r"/documentation/", r"/manual/", r"/guide/",
+                r"/tutorial/", r"/readme"
+            ],
+            "content_patterns": [
+                r"<code", r"```", r"<pre>", r"example",
+                r"installation|setup|configuration"
+            ],
+            "schema_patterns": ["TechArticle"]
+        },
+        "manga": {
+            "url_patterns": [
+                r"/manga/", r"/comic/", r"/chapter/", 
+                r"mangadex|mangaplus|manganelo"
+            ],
+            "content_patterns": [
+                r"<img[^>]+class=.*?manga|chapter",
+                r"page.*?\d+", r"next.*?chapter"
+            ],
+            "schema_patterns": ["Manga", "Comic"]
+        },
+        "academic": {
+            "url_patterns": [
+                r"/paper/", r"/research/", r"/study/",
+                r"arxiv.org", r"scholar.google", r"researchgate"
+            ],
+            "content_patterns": [
+                r"abstract|introduction|conclusion",
+                r"doi:|citation|reference"
+            ],
+            "schema_patterns": ["ScholarlyArticle"]
+        },
+    }
     
     @staticmethod
-    def _score_article(metrics: Dict) -> float:
-        """Score likelihood of being a text article."""
-        score = 0.0
+    def classify(
+        url: str,
+        html: str,
+        jsonld_items: list = None
+    ) -> Tuple[str, float]:
+        """Classify content and return (type, confidence)."""
+        if jsonld_items is None:
+            jsonld_items = []
         
-        if metrics['text_length'] > 1000:
-            score += 0.3
-        elif metrics['text_length'] > 500:
-            score += 0.2
+        scores = {}
         
-        if 0.1 <= metrics['image_ratio'] <= 0.4:
-            score += 0.2
+        # Check each content type
+        for content_type, patterns in ContentClassifier.PATTERNS.items():
+            score = 0.0
+            matches = 0
+            total_checks = 0
+            
+            # URL pattern matching (0-30 points)
+            for pattern in patterns["url_patterns"]:
+                total_checks += 1
+                if re.search(pattern, url, re.IGNORECASE):
+                    score += 30 / len(patterns["url_patterns"])
+                    matches += 1
+            
+            # Content pattern matching (0-40 points)
+            for pattern in patterns["content_patterns"]:
+                total_checks += 1
+                if re.search(pattern, html, re.IGNORECASE):
+                    score += 40 / len(patterns["content_patterns"])
+                    matches += 1
+            
+            # Schema.org pattern matching (0-30 points)
+            for schema in patterns["schema_patterns"]:
+                total_checks += 1
+                schema_found = False
+                
+                # Check in JSON-LD
+                for item in jsonld_items:
+                    if isinstance(item, dict):
+                        item_type = item.get("@type", "")
+                        if isinstance(item_type, str):
+                            if schema in item_type:
+                                schema_found = True
+                        elif isinstance(item_type, list):
+                            if schema in item_type:
+                                schema_found = True
+                    
+                    if schema_found:
+                        break
+                
+                if schema_found:
+                    score += 30 / len(patterns["schema_patterns"])
+                    matches += 1
+            
+            scores[content_type] = score
         
-        if metrics['heading_count'] > 3:
-            score += 0.2
+        # Find best match
+        best_type = max(scores, key=scores.get)
+        best_score = scores[best_type]
         
-        if metrics['has_toc']:
-            score += 0.15
+        # Normalize to 0-1 confidence
+        confidence = min(best_score / 100.0, 1.0)
         
-        if metrics['blockquote_count'] > 0:
-            score += 0.1
+        # Default to 'unknown' if confidence is too low
+        if confidence < 0.1:
+            return "unknown", 0.0
         
-        if not metrics['has_form'] and not metrics['has_video']:
-            score += 0.05
-        
-        return min(1.0, score)
+        return best_type, confidence
     
     @staticmethod
-    def _score_manga(metrics: Dict) -> float:
-        """Score likelihood of being manga/webtoon."""
-        score = 0.0
+    def classify_batch(
+        pages: list
+    ) -> Dict[int, Tuple[str, float]]:
+        """Classify multiple pages efficiently.
         
-        if metrics['image_ratio'] > 0.6:
-            score += 0.3
+        Args:
+            pages: List of dicts with 'url', 'html', 'jsonld'
         
-        if metrics['image_count'] > 5 and metrics['text_length'] < 500:
-            score += 0.3
+        Returns:
+            Dict mapping page_id to (type, confidence)
+        """
+        results = {}
         
-        if metrics['is_series']:
-            score += 0.4
+        for page in pages:
+            content_type, confidence = ContentClassifier.classify(
+                page.get("url", ""),
+                page.get("html", ""),
+                page.get("jsonld", [])
+            )
+            results[page.get("id")] = (content_type, confidence)
         
-        if metrics['has_toc'] and metrics['image_count'] > 3:
-            score += 0.15
-        
-        return min(1.0, score)
-    
-    @staticmethod
-    def _score_video(metrics: Dict) -> float:
-        """Score likelihood of being video content."""
-        score = 0.0
-        
-        if metrics['has_video']:
-            score += 0.8
-        
-        if metrics['text_length'] < 500 and metrics['has_video']:
-            score += 0.2
-        
-        return min(1.0, score)
-    
-    @staticmethod
-    def _score_image(metrics: Dict) -> float:
-        """Score likelihood of being image gallery."""
-        score = 0.0
-        
-        if metrics['image_count'] > 20:
-            score += 0.4
-        elif metrics['image_count'] > 10:
-            score += 0.3
-        
-        if metrics['text_length'] < 300 and metrics['image_count'] > 5:
-            score += 0.3
-        
-        if metrics['image_ratio'] > 0.7:
-            score += 0.2
-        
-        if not metrics['has_form']:
-            score += 0.1
-        
-        return min(1.0, score)
-    
-    @staticmethod
-    def _score_forum(metrics: Dict) -> float:
-        """Score likelihood of being forum/discussion."""
-        score = 0.0
-        
-        if metrics['comment_indicators'] > 5:
-            score += 0.4
-        elif metrics['comment_indicators'] > 0:
-            score += 0.2
-        
-        if metrics['heading_count'] > 2:
-            score += 0.2
-        
-        if metrics['link_count'] > metrics['image_count']:
-            score += 0.15
-        
-        if metrics['blockquote_count'] > 0:
-            score += 0.15
-        
-        return min(1.0, score)
-    
-    @staticmethod
-    def _score_tool(metrics: Dict) -> float:
-        """Score likelihood of being a web tool/application."""
-        score = 0.0
-        
-        if metrics['has_form']:
-            score += 0.4
-        
-        if metrics['code_block_count'] > 0:
-            score += 0.25
-        
-        if metrics['text_length'] < 1000 and metrics['has_form']:
-            score += 0.2
-        
-        if not metrics['has_toc'] and metrics['image_count'] < 3:
-            score += 0.15
-        
-        return min(1.0, score)
+        return results
+
+contentclassifier = ContentClassifier()
