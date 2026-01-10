@@ -12,3 +12,4 @@ mecab-python3
 unidic-lite
 redis
 arq
+playwright
