@@ -134,11 +134,6 @@ class CrawlerService:
             # Calculate page value score
             score = page_value_scorer.score_page(
                 url=url,
-                link_metrics={
-                    "depth_from_root": 1,
-                    "internal_link_count": metadata.get("internal_links_count", 0),
-                    "external_backlink_estimate": 0,
-                },
                 content_metrics={
                     "has_structured_data": bool(metadata.get("structured_data")),
                     "is_article": metadata.get("page_type") == "article",
@@ -148,11 +143,11 @@ class CrawlerService:
                     "word_count": metadata.get("word_count", 0),
                     "headings_count": metadata.get("headings_count", 0),
                     "has_meta_description": bool(metadata.get("description")),
-                }
+                },
             )
             
             # Cache score
-            await crawl_cache.set_score(url, score.total_score)
+            await crawl_cache.set_score(url, score.get("total_score", 50.0))
             
             # Detect spam
             spam_report = spam_detector.analyze_page(
@@ -173,12 +168,12 @@ class CrawlerService:
                     analysis_id=analysis_id,
                     job_id=job_id,
                     url=url,
-                    total_score=score.total_score,
-                    crawl_priority=score.crawl_priority,
-                    recommendation=score.recommendation,
-                    spam_score=spam_report.spam_score,
-                    risk_level=spam_report.risk_level,
-                    query_intent=intent.primary_intent,
+                    total_score=score.get("total_score", 50.0),
+                    crawl_priority=score.get("crawl_priority", 5),
+                    recommendation=score.get("recommendation", "CRAWL_LATER"),
+                    spam_score=spam_report.get("spam_score", 0.0),
+                    risk_level=spam_report.get("risk_level", "clean"),
+                    query_intent=intent.get("primary_intent"),
                     relevance_score=0.0,  # Would need query context
                     analyzed_at=now,
                 )
@@ -186,7 +181,7 @@ class CrawlerService:
                 await db.commit()
                 await db.refresh(analysis)
             
-            logger.info(f"📁 Analyzed page {url} (score: {score.total_score:.1f})")
+            logger.info(f"📁 Analyzed page {url} (score: {score.get('total_score', 50.0):.1f})")
             return analysis
         
         except Exception as e:
