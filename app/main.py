@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from .routers import search, suggest, click, images, admin
+from routers import search, suggest, click, images, admin
 
 app = FastAPI(title="Transparent Search API")
 
