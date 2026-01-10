@@ -22,7 +22,9 @@ services:
       - "${REDIS_PORT:-6379}:6379"
 
   api:
-    build: ./app
+    build:
+      context: .
+      dockerfile: Dockerfile
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "debug"]
     ports:
       - "8080:8080"
@@ -36,9 +38,12 @@ services:
         condition: service_started
     volumes:
       - ./app:/code/app
+      - ./db:/code/db
 
   worker:
-    build: ./app
+    build:
+      context: .
+      dockerfile: Dockerfile
     command: ["arq", "app.worker.WorkerSettings"]
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://user:password@db/search_engine}
@@ -51,6 +56,7 @@ services:
         condition: service_started
     volumes:
       - ./app:/code/app
+      - ./db:/code/db
 
 volumes:
   pg_data:
