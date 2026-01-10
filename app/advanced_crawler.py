@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from .utils.url_normalizer import normalize_url, is_valid_url
 from .utils.text_processor import clean_html_text, tokenize_with_mecab
+from .crawler_state import crawler_state
 
 # Configuration
 DATABASE_URL = os.getenv(
@@ -398,8 +400,10 @@ async def crawl_recursive(
     max_depth: int = 3,
     concurrency: int = 5,
     recrawl_days: int = 7,
+    crawl_id: Optional[str] = None,
 ):
-    """Advanced recursive crawler with tracker detection."""
+    """Advanced recursive crawler with tracker detection and cancellation support."""
+    crawl_id = crawl_id or str(uuid.uuid4())
     domain = urlparse(start_url).netloc
     base = f"{urlparse(start_url).scheme}://{domain}"
     
@@ -408,124 +412,156 @@ async def crawl_recursive(
     
     headers = {"User-Agent": USER_AGENT}
     
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
-        # Parse robots
-        rules, sitemaps = await parse_robots(client, base)
-        effective_delay = rules.crawl_delay or CRAWL_DELAY
-        
-        print(f"[*] Crawl delay: {effective_delay}s")
-        print(f"[*] Features: Tracker Detection")
-        
-        # Seed from sitemap
-        seeds = [normalize_url(start_url)]
-        if sitemaps:
-            sitemap_urls = await parse_sitemap_urls(client, sitemaps[0])
-            for u in sitemap_urls:
-                if urlparse(u).netloc == domain:
-                    seeds.append(normalize_url(u))
-        
-        # Queue: (url, depth)
-        queue: List[tuple[str, int]] = [(u, 0) for u in seeds]
-        seen: Set[str] = set(seeds)
-        
-        # Check last crawl times (recrawl control)
-        async with AsyncSession(engine) as session:
-            try:
-                cutoff = datetime.now() - timedelta(days=recrawl_days)
-                result = await session.execute(
-                    text("SELECT url FROM pages WHERE last_crawled_at > :cutoff"),
-                    {"cutoff": cutoff},
-                )
-                recent_urls = {normalize_url(r[0]) for r in result.fetchall()}
-            except Exception as e:
-                print(f"⚠️  Recrawl check error: {e}")
-                recent_urls = set()
-        
-        async def crawl_one(url: str, depth: int):
-            async with semaphore:
-                stats.total_attempted += 1
-                
+    # Initialize crawler state
+    await crawler_state.start_crawl(crawl_id, domain)
+    
+    try:
+        async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
+            # Parse robots
+            rules, sitemaps = await parse_robots(client, base)
+            effective_delay = rules.crawl_delay or CRAWL_DELAY
+            
+            print(f"[*] Crawl ID: {crawl_id}")
+            print(f"[*] Crawl delay: {effective_delay}s")
+            print(f"[*] Features: Tracker Detection, Cancellation Support")
+            
+            # Seed from sitemap
+            seeds = [normalize_url(start_url)]
+            if sitemaps:
+                sitemap_urls = await parse_sitemap_urls(client, sitemaps[0])
+                for u in sitemap_urls:
+                    if urlparse(u).netloc == domain:
+                        seeds.append(normalize_url(u))
+            
+            # Queue: (url, depth)
+            queue: List[tuple[str, int]] = [(u, 0) for u in seeds]
+            seen: Set[str] = set(seeds)
+            
+            # Check last crawl times (recrawl control)
+            async with AsyncSession(engine) as session:
                 try:
-                    # Rate limiting
-                    await asyncio.sleep(effective_delay)
-                    
-                    # Robots check
-                    path = urlparse(url).path or "/"
-                    if not rules.is_allowed(path):
-                        stats.total_skipped += 1
-                        print(f"[SKIP] Robots.txt: {url}")
-                        return []
-                    
-                    # Recrawl check
-                    if normalize_url(url) in recent_urls:
-                        stats.total_skipped += 1
-                        return []
-                    
-                    resp = await fetch_with_retry(client, url)
-                    if not resp:
-                        stats.total_failed += 1
-                        print(f"[FAIL] {url}")
-                        return []
-                    
-                    # Content-Type check
-                    content_type = resp.headers.get("content-type", "")
-                    if "text/html" not in content_type:
-                        stats.total_skipped += 1
-                        return []
-                    
-                    # Charset detection
-                    charset = detect_charset(resp.content)
-                    try:
-                        html = resp.content.decode(charset, errors="ignore")
-                    except Exception:
-                        html = resp.text
-                    
-                    soup = BeautifulSoup(html, "lxml")
-                    metadata = extract_metadata(soup, url)
-                    
-                    # Detect trackers
-                    tracker_result = detect_trackers(html, url)
-                    tracker_risk_score = tracker_result.get('tracker_risk_score', 0.5)
-                    
-                    # Save to DB
-                    async with AsyncSession(engine) as session:
-                        async with session.begin():
-                            site_id = await register_site(session, domain, base)
-                            page_id = await upsert_page(session, site_id, url, metadata, tracker_risk_score)
-                            await save_images(session, page_id, metadata["images"])
-                    
-                    stats.total_success += 1
-                    print(f"[OK] {stats.total_success}/{max_pages} (depth={depth}) {url} | Trackers: {tracker_result.get('tracker_count', 0)} | Risk: {tracker_result.get('risk_profile', 'unknown')}")
-                    
-                    # Extract links for next level
-                    new_links = []
-                    if depth < max_depth:
-                        for link, is_same in metadata["links"]:
-                            norm = normalize_url(link)
-                            if norm not in seen and is_valid_url(norm):
-                                if is_same:
-                                    new_links.append((norm, depth + 1))
-                                seen.add(norm)
-                    
-                    return new_links
+                    cutoff = datetime.now() - timedelta(days=recrawl_days)
+                    result = await session.execute(
+                        text("SELECT url FROM pages WHERE last_crawled_at > :cutoff"),
+                        {"cutoff": cutoff},
+                    )
+                    recent_urls = {normalize_url(r[0]) for r in result.fetchall()}
                 except Exception as e:
-                    stats.total_failed += 1
-                    print(f"[ERROR] {url}: {e}")
-                    return []
-        
-        while queue and stats.total_success < max_pages:
-            batch = []
-            while queue and len(batch) < concurrency and stats.total_success + len(batch) < max_pages:
-                batch.append(queue.pop(0))
+                    print(f"⚠️  Recrawl check error: {e}")
+                    recent_urls = set()
             
-            tasks = [crawl_one(url, depth) for url, depth in batch]
-            results = await asyncio.gather(*tasks)
+            async def crawl_one(url: str, depth: int):
+                async with semaphore:
+                    # Check if crawl should be cancelled
+                    if await crawler_state.is_cancelled(crawl_id):
+                        print(f"[CANCEL] Crawl cancelled, stopping at {url}")
+                        return []
+                    
+                    stats.total_attempted += 1
+                    
+                    try:
+                        # Rate limiting
+                        await asyncio.sleep(effective_delay)
+                        
+                        # Robots check
+                        path = urlparse(url).path or "/"
+                        if not rules.is_allowed(path):
+                            stats.total_skipped += 1
+                            print(f"[SKIP] Robots.txt: {url}")
+                            return []
+                        
+                        # Recrawl check
+                        if normalize_url(url) in recent_urls:
+                            stats.total_skipped += 1
+                            return []
+                        
+                        resp = await fetch_with_retry(client, url)
+                        if not resp:
+                            stats.total_failed += 1
+                            print(f"[FAIL] {url}")
+                            return []
+                        
+                        # Content-Type check
+                        content_type = resp.headers.get("content-type", "")
+                        if "text/html" not in content_type:
+                            stats.total_skipped += 1
+                            return []
+                        
+                        # Charset detection
+                        charset = detect_charset(resp.content)
+                        try:
+                            html = resp.content.decode(charset, errors="ignore")
+                        except Exception:
+                            html = resp.text
+                        
+                        soup = BeautifulSoup(html, "lxml")
+                        metadata = extract_metadata(soup, url)
+                        
+                        # Detect trackers
+                        tracker_result = detect_trackers(html, url)
+                        tracker_risk_score = tracker_result.get('tracker_risk_score', 0.5)
+                        
+                        # Save to DB
+                        async with AsyncSession(engine) as session:
+                            async with session.begin():
+                                site_id = await register_site(session, domain, base)
+                                page_id = await upsert_page(session, site_id, url, metadata, tracker_risk_score)
+                                await save_images(session, page_id, metadata["images"])
+                        
+                        stats.total_success += 1
+                        print(f"[OK] {stats.total_success}/{max_pages} (depth={depth}) {url} | Trackers: {tracker_result.get('tracker_count', 0)} | Risk: {tracker_result.get('risk_profile', 'unknown')}")
+                        
+                        # Update crawler state
+                        await crawler_state.update_progress(
+                            crawl_id,
+                            pages_crawled=stats.total_success,
+                            pages_failed=stats.total_failed,
+                            pages_skipped=stats.total_skipped,
+                            current_url=url,
+                        )
+                        
+                        # Extract links for next level
+                        new_links = []
+                        if depth < max_depth:
+                            for link, is_same in metadata["links"]:
+                                norm = normalize_url(link)
+                                if norm not in seen and is_valid_url(norm):
+                                    if is_same:
+                                        new_links.append((norm, depth + 1))
+                                    seen.add(norm)
+                        
+                        return new_links
+                    except Exception as e:
+                        stats.total_failed += 1
+                        print(f"[ERROR] {url}: {e}")
+                        return []
             
-            # Enqueue new links
-            for links in results:
-                queue.extend(links)
-        
-        print(f"\n[DONE] Attempted={stats.total_attempted}, Success={stats.total_success}, Failed={stats.total_failed}, Skipped={stats.total_skipped}")
+            while queue and stats.total_success < max_pages:
+                # Check cancellation at batch level too
+                if await crawler_state.is_cancelled(crawl_id):
+                    print(f"[CANCEL] Crawl cancelled, processed {stats.total_success} pages")
+                    break
+                
+                batch = []
+                while queue and len(batch) < concurrency and stats.total_success + len(batch) < max_pages:
+                    batch.append(queue.pop(0))
+                
+                tasks = [crawl_one(url, depth) for url, depth in batch]
+                results = await asyncio.gather(*tasks)
+                
+                # Enqueue new links
+                for links in results:
+                    queue.extend(links)
+            
+            print(f"\n[DONE] Attempted={stats.total_attempted}, Success={stats.total_success}, Failed={stats.total_failed}, Skipped={stats.total_skipped}")
+            
+            # End crawl state
+            await crawler_state.end_crawl(crawl_id, "completed")
+    
+    except Exception as e:
+        print(f"[ERROR] Crawl failed: {e}")
+        await crawler_state.end_crawl(crawl_id, "failed")
+        raise
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
