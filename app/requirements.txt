@@ -2,6 +2,7 @@ fastapi
 uvicorn
 sqlalchemy
 asyncpg
+alembic
 httpx
 beautifulsoup4
 lxml
