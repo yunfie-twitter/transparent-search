@@ -15,11 +15,11 @@ from bs4 import BeautifulSoup
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from utils.url_normalizer import normalize_url, is_valid_url
-from utils.text_processor import clean_html_text, tokenize_with_mecab
-from utils.tracker_detector import TrackerDetector
-from utils.content_classifier import ContentClassifier
-from utils.intent_detector import IntentDetector
+from .utils.url_normalizer import normalize_url, is_valid_url
+from .utils.text_processor import clean_html_text, tokenize_with_mecab
+from .utils.tracker_detector import TrackerDetector
+from .utils.content_classifier import ContentClassifier
+from .utils.intent_detector import IntentDetector
 
 # Configuration
 DATABASE_URL = os.getenv(
