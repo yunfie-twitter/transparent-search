@@ -1,16 +1,18 @@
 """Admin crawl management endpoints."""
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, Depends
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import uuid
 
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, desc, and_
+
 from ..utils.sitemap_manager import sitemap_manager
 from ..utils.content_classifier import content_classifier
+from ..db.database import get_db
+from ..db.models import CrawlJob, CrawlSession
 
 router = APIRouter(prefix="/admin/crawl", tags=["admin-crawl"])
-
-# In-memory storage for crawl jobs (replace with DB later)
-crawl_jobs: Dict[str, Dict[str, Any]] = {}
 
 # ============================================================================
 # Crawl Scheduling & Management
@@ -24,6 +26,7 @@ async def schedule_crawl(
     depth: int = Query(3, ge=1, le=5, description="Crawl depth"),
     include_js: bool = Query(False, description="Include JS rendering"),
     custom_sitemaps: Optional[List[str]] = Query(None, description="Custom sitemap URLs"),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Schedule a new crawl for a domain.
@@ -45,31 +48,43 @@ async def schedule_crawl(
         # Limit to max_pages
         urls_to_crawl = all_urls[:max_pages]
         
-        # Create crawl job
-        job_id = str(uuid.uuid4())
+        # Create crawl session
+        session_id = str(uuid.uuid4())
+        crawl_session = CrawlSession(
+            session_id=session_id,
+            domain=domain,
+            status="pending",
+            total_pages=len(urls_to_crawl),
+            crawled_pages=0,
+            failed_pages=0,
+            created_at=datetime.utcnow(),
+        )
         
-        crawl_job = {
-            "job_id": job_id,
-            "domain": domain,
-            "status": "pending",
-            "priority": priority,
-            "total_pages": len(urls_to_crawl),
-            "crawled_pages": 0,
-            "failed_pages": 0,
-            "max_depth": depth,
-            "enable_js_rendering": include_js,
-            "created_at": datetime.utcnow(),
-            "started_at": None,
-            "completed_at": None,
-            "urls_to_crawl": urls_to_crawl,
-        }
+        db.add(crawl_session)
         
-        # Store in memory
-        crawl_jobs[job_id] = crawl_job
+        # Create individual crawl jobs
+        job_ids = []
+        for url in urls_to_crawl:
+            job_id = str(uuid.uuid4())
+            crawl_job = CrawlJob(
+                job_id=job_id,
+                session_id=session_id,
+                domain=domain,
+                url=url,
+                status="pending",
+                priority=priority,
+                max_depth=depth,
+                enable_js_rendering=include_js,
+                created_at=datetime.utcnow(),
+            )
+            db.add(crawl_job)
+            job_ids.append(job_id)
+        
+        await db.commit()
         
         return {
             "status": "scheduled",
-            "job_id": job_id,
+            "session_id": session_id,
             "domain": domain,
             "total_pages": len(urls_to_crawl),
             "auto_detected_sitemaps": list(auto_detected),
@@ -81,6 +96,7 @@ async def schedule_crawl(
         }
     
     except Exception as e:
+        await db.rollback()
         raise HTTPException(status_code=500, detail=f"Scheduling error: {str(e)}")
 
 
@@ -90,6 +106,7 @@ async def schedule_crawl_urls(
     urls: List[str] = Body(..., description="List of URLs to crawl"),
     priority: int = Query(5, ge=1, le=10),
     include_js: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Schedule crawl with manually specified URLs.
@@ -106,26 +123,40 @@ async def schedule_crawl_urls(
         raise HTTPException(status_code=400, detail="Too many URLs (max 50,000)")
     
     try:
-        job_id = str(uuid.uuid4())
+        session_id = str(uuid.uuid4())
         
-        crawl_job = {
-            "job_id": job_id,
-            "domain": domain,
-            "status": "pending",
-            "priority": priority,
-            "total_pages": len(urls),
-            "crawled_pages": 0,
-            "failed_pages": 0,
-            "enable_js_rendering": include_js,
-            "created_at": datetime.utcnow(),
-            "urls_to_crawl": urls,
-        }
+        # Create crawl session
+        crawl_session = CrawlSession(
+            session_id=session_id,
+            domain=domain,
+            status="pending",
+            total_pages=len(urls),
+            created_at=datetime.utcnow(),
+        )
+        db.add(crawl_session)
         
-        crawl_jobs[job_id] = crawl_job
+        # Create individual jobs
+        job_ids = []
+        for url in urls:
+            job_id = str(uuid.uuid4())
+            crawl_job = CrawlJob(
+                job_id=job_id,
+                session_id=session_id,
+                domain=domain,
+                url=url,
+                status="pending",
+                priority=priority,
+                enable_js_rendering=include_js,
+                created_at=datetime.utcnow(),
+            )
+            db.add(crawl_job)
+            job_ids.append(job_id)
+        
+        await db.commit()
         
         return {
             "status": "scheduled",
-            "job_id": job_id,
+            "session_id": session_id,
             "domain": domain,
             "urls_count": len(urls),
             "priority": priority,
@@ -133,63 +164,50 @@ async def schedule_crawl_urls(
         }
     
     except Exception as e:
+        await db.rollback()
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
 @router.get("/jobs")
 async def list_crawl_jobs(
-    status: Optional[str] = Query(None, description="Filter by status (pending, running, completed, failed)"),
+    status: Optional[str] = Query(None, description="Filter by status"),
     domain: Optional[str] = Query(None, description="Filter by domain"),
     limit: int = Query(50, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     List all crawl jobs with filtering.
-    
-    Statuses:
-    - pending: Waiting to start
-    - running: Currently crawling
-    - completed: Finished successfully
-    - failed: Failed
-    - cancelled: Manually cancelled
     """
     try:
-        jobs = list(crawl_jobs.values())
+        query = select(CrawlJob)
         
-        # Filter by status
         if status:
-            jobs = [j for j in jobs if j["status"] == status]
+            query = query.where(CrawlJob.status == status)
         
-        # Filter by domain
         if domain:
-            jobs = [j for j in jobs if j["domain"] == domain]
+            query = query.where(CrawlJob.domain == domain)
         
-        # Sort by created_at (newest first)
-        jobs.sort(key=lambda x: x["created_at"], reverse=True)
+        query = query.order_by(desc(CrawlJob.created_at))
+        query = query.limit(limit).offset(offset)
         
-        # Pagination
-        jobs = jobs[offset:offset + limit]
+        result = await db.execute(query)
+        jobs = result.scalars().all()
         
         return {
             "jobs": [
                 {
-                    "job_id": job["job_id"],
-                    "domain": job["domain"],
-                    "status": job["status"],
-                    "priority": job["priority"],
-                    "progress": {
-                        "total": job["total_pages"],
-                        "crawled": job["crawled_pages"],
-                        "failed": job["failed_pages"],
-                        "percentage": round((job["crawled_pages"] / job["total_pages"] * 100) if job["total_pages"] > 0 else 0, 2),
-                    },
-                    "created_at": job["created_at"].isoformat(),
-                    "started_at": job["started_at"].isoformat() if job["started_at"] else None,
-                    "completed_at": job["completed_at"].isoformat() if job["completed_at"] else None,
-                    "duration_seconds": (
-                        (job["completed_at"] - job["started_at"]).total_seconds()
-                        if job["completed_at"] and job["started_at"] else None
-                    ),
+                    "job_id": job.job_id,
+                    "domain": job.domain,
+                    "url": job.url,
+                    "status": job.status,
+                    "priority": job.priority,
+                    "page_value_score": float(job.page_value_score),
+                    "spam_score": float(job.spam_score),
+                    "relevance_score": float(job.relevance_score),
+                    "created_at": job.created_at.isoformat() if job.created_at else None,
+                    "started_at": job.started_at.isoformat() if job.started_at else None,
+                    "completed_at": job.completed_at.isoformat() if job.completed_at else None,
                 }
                 for job in jobs
             ],
@@ -201,38 +219,52 @@ async def list_crawl_jobs(
 
 
 @router.get("/jobs/{job_id}")
-async def get_crawl_job(job_id: str):
+async def get_crawl_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+):
     """
     Get detailed information about a specific crawl job.
     """
     try:
-        job = crawl_jobs.get(job_id)
+        query = select(CrawlJob).where(CrawlJob.job_id == job_id)
+        result = await db.execute(query)
+        job = result.scalar_one_or_none()
         
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         
         return {
-            "job_id": job["job_id"],
-            "domain": job["domain"],
-            "status": job["status"],
-            "priority": job["priority"],
-            "progress": {
-                "total": job["total_pages"],
-                "crawled": job["crawled_pages"],
-                "failed": job["failed_pages"],
-                "percentage": round((job["crawled_pages"] / job["total_pages"] * 100) if job["total_pages"] > 0 else 0, 2),
+            "job_id": job.job_id,
+            "session_id": job.session_id,
+            "domain": job.domain,
+            "url": job.url,
+            "status": job.status,
+            "priority": job.priority,
+            "depth": job.depth,
+            "max_depth": job.max_depth,
+            "title": job.title,
+            "description": job.description,
+            "word_count": job.word_count,
+            "headings_count": job.headings_count,
+            "internal_links_count": job.internal_links_count,
+            "external_links_count": job.external_links_count,
+            "scoring": {
+                "page_value_score": float(job.page_value_score),
+                "spam_score": float(job.spam_score),
+                "relevance_score": float(job.relevance_score),
             },
-            "settings": {
-                "max_depth": job.get("max_depth", 3),
-                "js_rendering": job["enable_js_rendering"],
+            "flags": {
+                "has_structured_data": job.has_structured_data,
+                "has_og_tags": job.has_og_tags,
+                "has_meta_description": job.has_meta_description,
+                "js_rendering": job.enable_js_rendering,
             },
             "timestamps": {
-                "created_at": job["created_at"].isoformat(),
-                "started_at": job["started_at"].isoformat() if job["started_at"] else None,
-                "completed_at": job["completed_at"].isoformat() if job["completed_at"] else None,
+                "created_at": job.created_at.isoformat() if job.created_at else None,
+                "started_at": job.started_at.isoformat() if job.started_at else None,
+                "completed_at": job.completed_at.isoformat() if job.completed_at else None,
             },
-            "urls_to_crawl": job["urls_to_crawl"][:10],  # First 10 URLs
-            "urls_count": len(job["urls_to_crawl"]),
         }
     
     except HTTPException:
@@ -242,24 +274,31 @@ async def get_crawl_job(job_id: str):
 
 
 @router.post("/jobs/{job_id}/cancel")
-async def cancel_crawl_job(job_id: str):
+async def cancel_crawl_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+):
     """
     Cancel a pending or running crawl job.
     """
     try:
-        job = crawl_jobs.get(job_id)
+        query = select(CrawlJob).where(CrawlJob.job_id == job_id)
+        result = await db.execute(query)
+        job = result.scalar_one_or_none()
         
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         
-        if job["status"] in ["completed", "failed", "cancelled"]:
+        if job.status in ["completed", "failed", "cancelled"]:
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot cancel job with status '{job['status']}'"
+                detail=f"Cannot cancel job with status '{job.status}'"
             )
         
-        job["status"] = "cancelled"
-        job["completed_at"] = datetime.utcnow()
+        job.status = "cancelled"
+        job.completed_at = datetime.utcnow()
+        
+        await db.commit()
         
         return {
             "status": "cancelled",
@@ -270,6 +309,7 @@ async def cancel_crawl_job(job_id: str):
     except HTTPException:
         raise
     except Exception as e:
+        await db.rollback()
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
@@ -282,6 +322,7 @@ async def batch_schedule_crawls(
     domains: List[str] = Body(..., description="List of domains to crawl"),
     priority: int = Query(5, ge=1, le=10),
     include_js: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Schedule multiple domains for crawling at once.
@@ -298,26 +339,33 @@ async def batch_schedule_crawls(
         
         for domain in domains:
             try:
+                session_id = str(uuid.uuid4())
                 job_id = str(uuid.uuid4())
                 
-                crawl_job = {
-                    "job_id": job_id,
-                    "domain": domain,
-                    "status": "pending",
-                    "priority": priority,
-                    "enable_js_rendering": include_js,
-                    "created_at": datetime.utcnow(),
-                    "total_pages": 0,
-                    "crawled_pages": 0,
-                    "failed_pages": 0,
-                    "urls_to_crawl": [],
-                }
+                crawl_session = CrawlSession(
+                    session_id=session_id,
+                    domain=domain,
+                    status="pending",
+                    created_at=datetime.utcnow(),
+                )
+                db.add(crawl_session)
                 
-                crawl_jobs[job_id] = crawl_job
-                job_ids.append({"domain": domain, "job_id": job_id})
+                crawl_job = CrawlJob(
+                    job_id=job_id,
+                    session_id=session_id,
+                    domain=domain,
+                    status="pending",
+                    priority=priority,
+                    enable_js_rendering=include_js,
+                    created_at=datetime.utcnow(),
+                )
+                db.add(crawl_job)
+                job_ids.append({"domain": domain, "job_id": job_id, "session_id": session_id})
             
             except Exception as e:
                 errors.append({"domain": domain, "error": str(e)})
+        
+        await db.commit()
         
         return {
             "status": "batch_scheduled",
@@ -329,12 +377,14 @@ async def batch_schedule_crawls(
         }
     
     except Exception as e:
+        await db.rollback()
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
 @router.post("/batch/cancel")
 async def batch_cancel_crawls(
     job_ids: List[str] = Body(..., description="Job IDs to cancel"),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Cancel multiple crawl jobs at once.
@@ -343,13 +393,23 @@ async def batch_cancel_crawls(
         raise HTTPException(status_code=400, detail="Job IDs list cannot be empty")
     
     try:
+        query = select(CrawlJob).where(
+            and_(
+                CrawlJob.job_id.in_(job_ids),
+                CrawlJob.status.in_(["pending", "running"])
+            )
+        )
+        
+        result = await db.execute(query)
+        jobs = result.scalars().all()
+        
         cancelled_count = 0
-        for job_id in job_ids:
-            job = crawl_jobs.get(job_id)
-            if job and job["status"] in ["pending", "running"]:
-                job["status"] = "cancelled"
-                job["completed_at"] = datetime.utcnow()
-                cancelled_count += 1
+        for job in jobs:
+            job.status = "cancelled"
+            job.completed_at = datetime.utcnow()
+            cancelled_count += 1
+        
+        await db.commit()
         
         return {
             "status": "batch_cancelled",
@@ -358,6 +418,7 @@ async def batch_cancel_crawls(
         }
     
     except Exception as e:
+        await db.rollback()
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
@@ -368,6 +429,7 @@ async def batch_cancel_crawls(
 @router.get("/stats")
 async def crawl_statistics(
     hours: int = Query(24, ge=1, le=730, description="Last N hours"),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Get crawl statistics for the last N hours.
@@ -375,34 +437,37 @@ async def crawl_statistics(
     try:
         cutoff_time = datetime.utcnow() - timedelta(hours=hours)
         
-        jobs = [
-            job for job in crawl_jobs.values()
-            if job["created_at"] >= cutoff_time
-        ]
+        query = select(CrawlJob).where(CrawlJob.created_at >= cutoff_time)
+        result = await db.execute(query)
+        jobs = result.scalars().all()
         
         stats = {
             "total_jobs": len(jobs),
             "by_status": {},
             "by_domain": {},
-            "total_pages_crawled": 0,
-            "total_pages_failed": 0,
-            "average_pages_per_job": 0,
+            "total_pages_crawled": sum(job.crawled_pages for job in jobs),
+            "total_pages_failed": sum(job.failed_pages for job in jobs),
+            "average_pages_per_job": 0.0,
+            "average_page_value_score": 0.0,
+            "average_spam_score": 0.0,
         }
         
         for job in jobs:
             # Count by status
-            stats["by_status"][job["status"]] = stats["by_status"].get(job["status"], 0) + 1
+            stats["by_status"][job.status] = stats["by_status"].get(job.status, 0) + 1
             
             # Count by domain
-            stats["by_domain"][job["domain"]] = stats["by_domain"].get(job["domain"], 0) + 1
-            
-            # Total pages
-            stats["total_pages_crawled"] += job["crawled_pages"]
-            stats["total_pages_failed"] += job["failed_pages"]
+            stats["by_domain"][job.domain] = stats["by_domain"].get(job.domain, 0) + 1
         
         if jobs:
             stats["average_pages_per_job"] = round(
                 stats["total_pages_crawled"] / len(jobs), 2
+            )
+            stats["average_page_value_score"] = round(
+                sum(job.page_value_score for job in jobs) / len(jobs), 2
+            )
+            stats["average_spam_score"] = round(
+                sum(job.spam_score for job in jobs) / len(jobs), 2
             )
         
         return stats
@@ -412,30 +477,34 @@ async def crawl_statistics(
 
 
 @router.get("/stats/domain/{domain}")
-async def domain_crawl_stats(domain: str):
+async def domain_crawl_stats(
+    domain: str,
+    db: AsyncSession = Depends(get_db),
+):
     """
     Get detailed statistics for a specific domain.
     """
     try:
-        jobs = [job for job in crawl_jobs.values() if job["domain"] == domain]
+        query = select(CrawlJob).where(CrawlJob.domain == domain)
+        result = await db.execute(query)
+        jobs = result.scalars().all()
         
         if not jobs:
             raise HTTPException(status_code=404, detail="No crawl jobs found for domain")
         
-        total_crawled = sum(job["crawled_pages"] for job in jobs)
-        total_failed = sum(job["failed_pages"] for job in jobs)
+        total_crawled = sum(job.crawled_pages for job in jobs)
+        total_failed = sum(job.failed_pages for job in jobs)
         total_jobs = len(jobs)
         
-        completed_jobs = [j for j in jobs if j["status"] == "completed"]
-        failed_jobs = [j for j in jobs if j["status"] == "failed"]
+        completed_jobs = [j for j in jobs if j.status == "completed"]
         
         return {
             "domain": domain,
             "total_jobs": total_jobs,
-            "completed_jobs": len(completed_jobs),
-            "failed_jobs": len(failed_jobs),
-            "running_jobs": len([j for j in jobs if j["status"] == "running"]),
-            "pending_jobs": len([j for j in jobs if j["status"] == "pending"]),
+            "completed_jobs": len([j for j in jobs if j.status == "completed"]),
+            "failed_jobs": len([j for j in jobs if j.status == "failed"]),
+            "running_jobs": len([j for j in jobs if j.status == "running"]),
+            "pending_jobs": len([j for j in jobs if j.status == "pending"]),
             "total_pages_crawled": total_crawled,
             "total_pages_failed": total_failed,
             "success_rate": round(
@@ -445,15 +514,15 @@ async def domain_crawl_stats(domain: str):
             ),
             "average_duration_seconds": round(
                 sum(
-                    (job["completed_at"] - job["started_at"]).total_seconds()
+                    (job.completed_at - job.started_at).total_seconds()
                     for job in completed_jobs
-                    if job["completed_at"] and job["started_at"]
+                    if job.completed_at and job.started_at
                 ) / len(completed_jobs)
                 if completed_jobs else 0,
                 2
             ),
             "last_crawl": max(
-                (job["completed_at"] or job["created_at"] for job in jobs),
+                (job.completed_at or job.created_at for job in jobs),
                 default=None
             ).isoformat() if jobs else None,
         }
@@ -492,6 +561,7 @@ async def get_crawl_config():
             "custom_sitemap_support": True,
             "batch_operations": True,
             "statistics": True,
+            "postgresql_backed": True,
         },
     }
 
@@ -524,7 +594,8 @@ async def crawl_api_documentation():
     """
     return {
         "title": "Crawl Management API",
-        "version": "1.0",
+        "version": "2.0",
+        "backend": "PostgreSQL + SQLAlchemy",
         "sections": {
             "scheduling": {
                 "POST /admin/crawl/schedule": "Schedule auto-detected sitemap crawl",
