@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-WORKDIR /code/app
+WORKDIR /code
 
 # Install system dependencies for MeCab
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -15,7 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Copy application code to /code/app
+COPY . ./app
 
-# Default command runs the API
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Default command runs the API as a package
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
