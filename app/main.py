@@ -1,7 +1,25 @@
 from fastapi import FastAPI
+from contextlib import asynccontextmanager
 from .routers import search, suggest, click, images, admin
+from .db_init import init_db
 
-app = FastAPI(title="Transparent Search API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    print("🚀 Initializing database...")
+    try:
+        await init_db()
+        print("✅ Database initialization complete")
+    except Exception as e:
+        print(f"⚠️ Database initialization warning: {e}")
+    yield
+    # Shutdown
+    print("🛑 Shutting down...")
+
+app = FastAPI(
+    title="Transparent Search API",
+    lifespan=lifespan
+)
 
 app.include_router(search.router)
 app.include_router(suggest.router)
