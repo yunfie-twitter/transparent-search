@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 import logging
+import random
 
 from app.core.database import get_db
 from app.services.crawler import crawler_service
@@ -89,6 +90,86 @@ async def create_job(
         }
     except Exception as e:
         logger.error(f"Error creating job for {url}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/job/auto")
+async def auto_crawl(
+    max_jobs: int = Query(1, ge=1, le=100),
+    max_depth: int = Query(3, ge=1, le=15),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Automatically start crawl jobs for random registered sites until stopped.
+    
+    Args:
+        max_jobs: Maximum number of jobs to create per call
+        max_depth: Maximum crawl depth for each job
+        db: Database session
+        
+    Returns:
+        Auto crawl session details
+    """
+    try:
+        # Get all unique domains from existing crawl sessions
+        stmt = select(func.distinct(CrawlSession.domain)).order_by(CrawlSession.domain)
+        result = await db.execute(stmt)
+        domains = [row[0] for row in result.fetchall()]
+        
+        if not domains:
+            raise HTTPException(
+                status_code=400,
+                detail="No registered sites found. Please create at least one crawl session first."
+            )
+        
+        # Randomly select domains
+        selected_domains = random.sample(domains, min(len(domains), max_jobs))
+        
+        created_jobs = []
+        for domain in selected_domains:
+            try:
+                # Create session
+                session = await crawler_service.create_crawl_session(domain=domain)
+                
+                # Create initial crawl job for domain root
+                base_url = f"https://{domain}"
+                job = await crawler_service.create_crawl_job(
+                    session_id=session.session_id,
+                    domain=domain,
+                    url=base_url,
+                    depth=0,
+                    max_depth=max_depth,
+                    enable_js_rendering=False,
+                )
+                
+                created_jobs.append({
+                    "domain": domain,
+                    "session_id": session.session_id,
+                    "job_id": job.job_id,
+                    "url": job.url,
+                })
+                logger.info(f"✅ Auto-created job for {domain}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to auto-crawl {domain}: {e}")
+                continue
+        
+        if not created_jobs:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to create any crawl jobs"
+            )
+        
+        return {
+            "status": "success",
+            "message": f"Auto-crawl started for {len(created_jobs)} site(s)",
+            "total_domains": len(domains),
+            "crawled_domains": len(created_jobs),
+            "jobs": created_jobs,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in auto crawl: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
