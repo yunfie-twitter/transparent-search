@@ -56,6 +56,8 @@ async def lifespan(app: FastAPI):
         # Create background task for worker
         worker_task = asyncio.create_task(crawl_worker.worker_loop())
         logger.info("✅ Crawl worker started (background task created)")
+        # Give worker time to start processing
+        await asyncio.sleep(0.5)
     except Exception as e:
         logger.error(f"❌ Crawl worker startup failed: {e}")
         crawl_worker.is_running = False
@@ -217,5 +219,5 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8080,
-        reload=True,
+        reload=False,
     )
