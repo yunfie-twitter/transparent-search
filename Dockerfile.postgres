@@ -21,5 +21,5 @@ RUN \
   apt clean && \
   rm -rf /var/lib/apt/lists/*
 
-# Configure PostgreSQL to load PGroonga extension on startup
-RUN echo "shared_preload_libraries = 'pgroonga'" >> /etc/postgresql-common/createcluster.conf
+# Copy custom PostgreSQL configuration to enable PGroonga on startup
+COPY postgresql.conf /etc/postgresql/postgresql.conf.d/pgroonga.conf
