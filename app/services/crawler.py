@@ -124,7 +124,7 @@ class CrawlerService:
             return crawl_session
         
         except Exception as e:
-            logger.error(f"❌ Failed to create crawl session: {e}")
+            logger.error(f"❌ Failed to create crawl session: {e}", exc_info=True)
             raise
     
     async def create_crawl_job(
@@ -192,7 +192,7 @@ class CrawlerService:
             return crawl_job
         
         except Exception as e:
-            logger.error(f"❌ Failed to create crawl job: {e}")
+            logger.error(f"❌ Failed to create crawl job: {e}", exc_info=True)
             raise
     
     async def execute_crawl_job(
@@ -205,34 +205,31 @@ class CrawlerService:
         max_depth: int = 3,
     ) -> Optional[Dict[str, Any]]:
         """Execute actual crawling: fetch page, extract links, store results."""
-        logger.debug(f"[{job_id[:8]}] Starting execution for {url}")
+        job_key = job_id[:8]
+        logger.info(f"🔄 [{job_key}] Starting execution for {url}")
         
         try:
-            # Update job status to processing
-            logger.debug(f"[{job_id[:8]}] Updating status to 'processing'")
-            await self.update_crawl_job_status(job_id, "processing")
-            
             # Fetch the page
             client = await self._get_http_client()
-            logger.info(f"🌐 [{job_id[:8]}] Fetching: {url}")
+            logger.info(f"🌐 [{job_key}] Fetching: {url}")
             
             try:
                 response = await client.get(url, follow_redirects=True)
                 response.raise_for_status()
             except httpx.HTTPError as http_err:
-                logger.error(f"❌ [{job_id[:8]}] HTTP error: {http_err}")
+                logger.error(f"❌ [{job_key}] HTTP error: {http_err}")
                 await self.update_crawl_job_status(job_id, "failed")
                 return None
             
             html_content = response.text
-            logger.debug(f"[{job_id[:8]}] Fetched {len(html_content)} bytes")
+            logger.debug(f"[{job_key}] Fetched {len(html_content)} bytes")
             
             # Analyze the page
-            logger.debug(f"[{job_id[:8]}] Analyzing page content")
+            logger.debug(f"[{job_key}] Analyzing page content")
             analysis = await self.analyze_page(job_id, url, html_content)
             
             if not analysis:
-                logger.warning(f"⚠️ [{job_id[:8]}] Failed to analyze {url}")
+                logger.warning(f"⚠️ [{job_key}] Failed to analyze {url}")
                 await self.update_crawl_job_status(job_id, "failed")
                 return None
             
@@ -241,11 +238,11 @@ class CrawlerService:
             
             if depth < max_depth:
                 try:
-                    logger.info(f"🔍 [{job_id[:8]}] Extracting links from {url}")
+                    logger.info(f"🔍 [{job_key}] Extracting links from {url}")
                     extractor = LinkExtractor(url)
                     extractor.feed(html_content)
                     
-                    logger.debug(f"[{job_id[:8]}] Found {len(extractor.links)} total links")
+                    logger.debug(f"[{job_key}] Found {len(extractor.links)} total links")
                     
                     # Filter links to stay within domain
                     domain_netloc = urlparse(f"https://{domain}").netloc
@@ -256,10 +253,10 @@ class CrawlerService:
                         if link_netloc == domain_netloc or domain_netloc in link_netloc:
                             filtered_links.append(link)
                     
-                    logger.info(f"✅ [{job_id[:8]}] Filtered to {len(filtered_links)} internal links")
+                    logger.info(f"✅ [{job_key}] Filtered to {len(filtered_links)} internal links")
                     
                     # Create pending jobs for each extracted link
-                    logger.info(f"📬 [{job_id[:8]}] Adding {len(filtered_links)} URLs to pending queue...")
+                    logger.info(f"📬 [{job_key}] Adding {len(filtered_links)} URLs to pending queue...")
                     for idx, link in enumerate(filtered_links, 1):
                         try:
                             # Create job for extracted link
@@ -278,17 +275,17 @@ class CrawlerService:
                                     "job_id": new_job.job_id,
                                 })
                         except Exception as e:
-                            logger.warning(f"[{job_id[:8]}] Failed to queue {link}: {e}")
+                            logger.warning(f"[{job_key}] Failed to queue {link}: {e}")
                     
-                    logger.info(f"✨ [{job_id[:8]}] Pending queue updated: {len(extracted_links)} new jobs created")
+                    logger.info(f"✨ [{job_key}] Pending queue updated: {len(extracted_links)} new jobs created")
                 
                 except Exception as e:
-                    logger.warning(f"[{job_id[:8]}] Link extraction failed: {e}")
+                    logger.warning(f"[{job_key}] Link extraction failed: {e}")
             else:
-                logger.info(f"🛑 [{job_id[:8]}] Max depth ({max_depth}) reached, no more links will be extracted")
+                logger.info(f"🛑 [{job_key}] Max depth ({max_depth}) reached, no more links will be extracted")
             
-            # Store extracted links as metadata
-            logger.debug(f"[{job_id[:8]}] Updating job with completion status")
+            # Update job status to completed with extracted links
+            logger.debug(f"[{job_key}] Updating job with completion status")
             async with get_db_session() as db:
                 stmt = select(CrawlJob).where(CrawlJob.job_id == job_id)
                 result = await db.execute(stmt)
@@ -303,11 +300,11 @@ class CrawlerService:
                         "analysis_id": analysis.analysis_id if analysis else None,
                     }
                     await db.commit()
-                    logger.debug(f"[{job_id[:8]}] Job marked as completed in DB")
+                    logger.debug(f"[{job_key}] Job marked as completed in DB")
                 else:
-                    logger.error(f"[{job_id[:8]}] Job not found in database!")
+                    logger.error(f"[{job_key}] Job not found in database!")
             
-            logger.info(f"🎉 [{job_id[:8]}] Completed: {url}")
+            logger.info(f"🎉 [{job_key}] Completed: {url}")
             
             return {
                 "job_id": job_id,
@@ -319,11 +316,11 @@ class CrawlerService:
             }
         
         except Exception as e:
-            logger.error(f"❌ [{job_id[:8]}] Error executing crawl job: {e}", exc_info=True)
+            logger.error(f"❌ [{job_key}] Error executing crawl job: {e}", exc_info=True)
             try:
                 await self.update_crawl_job_status(job_id, "failed")
             except Exception as update_err:
-                logger.error(f"[{job_id[:8]}] Failed to update status to failed: {update_err}")
+                logger.error(f"[{job_key}] Failed to update status to failed: {update_err}")
             return None
     
     async def analyze_page(
@@ -333,11 +330,12 @@ class CrawlerService:
         html_content: str,
     ) -> Optional[PageAnalysis]:
         """Analyze page with metadata extraction, scoring, and caching."""
+        job_key = job_id[:8]
         try:
             analysis_id = str(uuid.uuid4())
             now = datetime.utcnow()
             
-            logger.debug(f"[{job_id[:8]}] Extracting metadata from page")
+            logger.debug(f"[{job_key}] Extracting metadata from page")
             metadata = metadata_analyzer.extract_metadata(html_content, url)
             
             try:
@@ -347,7 +345,7 @@ class CrawlerService:
             except Exception as cache_err:
                 logger.warning(f"Cache write failed (non-critical): {cache_err}")
             
-            logger.debug(f"[{job_id[:8]}] Calculating page value score")
+            logger.debug(f"[{job_key}] Calculating page value score")
             score = page_value_scorer.score_page(
                 url=url,
                 content_metrics={
@@ -369,14 +367,14 @@ class CrawlerService:
             except Exception as cache_err:
                 logger.warning(f"Cache write failed (non-critical): {cache_err}")
             
-            logger.debug(f"[{job_id[:8]}] Detecting spam")
+            logger.debug(f"[{job_key}] Detecting spam")
             spam_report = spam_detector.analyze_page(
                 url=url,
                 metadata=metadata,
                 html_content=html_content,
             )
             
-            logger.debug(f"[{job_id[:8]}] Analyzing query intent")
+            logger.debug(f"[{job_key}] Analyzing query intent")
             intent = query_intent_analyzer.analyze_query(
                 metadata.get("title", "")
             )
@@ -400,11 +398,11 @@ class CrawlerService:
                 await db.commit()
                 await db.refresh(analysis)
             
-            logger.info(f"📊 [{job_id[:8]}] Analyzed: {url} (score: {score.get('total_score', 50.0):.1f})")
+            logger.info(f"📊 [{job_key}] Analyzed: {url} (score: {score.get('total_score', 50.0):.1f})")
             return analysis
         
         except Exception as e:
-            logger.error(f"❌ [{job_id[:8]}] Page analysis failed: {e}", exc_info=True)
+            logger.error(f"❌ [{job_key}] Page analysis failed: {e}", exc_info=True)
             return None
     
     async def update_crawl_job_status(
@@ -414,7 +412,8 @@ class CrawlerService:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[CrawlJob]:
         """Update job status and clear cache if needed."""
-        logger.debug(f"[{job_id[:8]}] Updating status to '{status}'")
+        job_key = job_id[:8]
+        logger.debug(f"[{job_key}] Updating status to '{status}'")
         
         try:
             async with get_db_session() as db:
@@ -423,7 +422,7 @@ class CrawlerService:
                 job = result.scalar_one_or_none()
                 
                 if not job:
-                    logger.error(f"[{job_id[:8]}] Job not found in database!")
+                    logger.error(f"[{job_key}] Job not found in database!")
                     return None
                 
                 # Update job
@@ -438,7 +437,7 @@ class CrawlerService:
                 
                 await db.commit()
                 await db.refresh(job)
-                logger.debug(f"[{job_id[:8]}] Status updated to '{status}' in database")
+                logger.debug(f"[{job_key}] Status updated to '{status}' in database")
             
             # Update cache (non-critical)
             try:
@@ -458,7 +457,7 @@ class CrawlerService:
             return job
         
         except Exception as e:
-            logger.error(f"❌ [{job_id[:8]}] Job update failed: {e}", exc_info=True)
+            logger.error(f"❌ [{job_key}] Job update failed: {e}", exc_info=True)
             return None
     
     async def invalidate_domain_cache(self, domain: str):
