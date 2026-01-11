@@ -16,7 +16,7 @@ from app.db.models import (
     CrawlSession, CrawlJob, CrawlMetadata, PageAnalysis
 )
 from app.utils.metadata_analyzer import metadata_analyzer
-from app.utils.page_value_scorer import page_value_scorer, LinkMetrics
+from app.utils.page_value_scorer import page_value_scorer, LinkMetrics, ContentMetrics
 from app.utils.spam_detector import spam_detector
 from app.utils.query_intent_analyzer import query_intent_analyzer
 
@@ -347,17 +347,16 @@ class CrawlerService:
             
             logger.debug(f"[{job_key}] Calculating page value score")
             
-            # Create LinkMetrics for scoring
+            # Create LinkMetrics for scoring (simplified - would enhance in production)
             link_metrics = LinkMetrics(
-                depth_from_root=0,  # Simplified - would calculate from path
-                internal_link_count=0,  # Simplified - would track
-                external_backlink_estimate=0,  # Simplified - would estimate
-                outgoing_internal_links=0,  # Simplified - would count
-                outgoing_external_links=0,  # Simplified - would count
+                depth_from_root=0,
+                internal_link_count=0,
+                external_backlink_estimate=0,
+                outgoing_internal_links=0,
+                outgoing_external_links=0,
             )
             
             # Create ContentMetrics for scoring
-            from app.utils.page_value_scorer import ContentMetrics
             content_metrics = ContentMetrics(
                 has_structured_data=bool(metadata.get("structured_data")),
                 is_article=metadata.get("page_type") == "article",
@@ -383,11 +382,19 @@ class CrawlerService:
             except Exception as cache_err:
                 logger.warning(f"Cache write failed (non-critical): {cache_err}")
             
-            logger.debug(f"[{job_key}] Detecting spam")
-            spam_report = spam_detector.analyze_page(
-                url=url,
-                metadata=metadata,
-                html_content=html_content,
+            # ✅ Use analyze_domain instead of analyze_page
+            logger.debug(f"[{job_key}] Running spam detection")
+            spam_report = spam_detector.analyze_domain(
+                domain=urlparse(url).netloc,
+                pages_crawled=[{
+                    "url": url,
+                    "content": html_content,
+                    "word_count": metadata.get("word_count", 0),
+                    "link_count": metadata.get("link_count", 0),
+                    "internal_links": 0,
+                    "external_links": 0,
+                }],
+                link_graph={},
             )
             
             logger.debug(f"[{job_key}] Analyzing query intent")
@@ -404,8 +411,8 @@ class CrawlerService:
                     total_score=score.total_score,
                     crawl_priority=score.crawl_priority,
                     recommendation=score.recommendation,
-                    spam_score=spam_report.get("spam_score", 0.0),
-                    risk_level=spam_report.get("risk_level", "clean"),
+                    spam_score=spam_report.spam_score if spam_report else 0.0,
+                    risk_level=spam_report.risk_level if spam_report else "clean",
                     query_intent=intent.get("primary_intent"),
                     relevance_score=0.0,
                     analyzed_at=now,
