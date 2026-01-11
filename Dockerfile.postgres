@@ -1,21 +1,21 @@
-FROM postgres:16-bookworm
+FROM postgres:16-trixie
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    gnupg \
-    apt-transport-https && \
-    # Add Groonga repository
-    curl -L https://packages.groonga.org/debian/groonga-apt-source-latest-bookworm.deb -o /tmp/groonga-apt-source.deb && \
-    dpkg -i /tmp/groonga-apt-source.deb && \
-    apt-get update && \
-    # Install PGroonga library
-    apt-get install -y --no-install-recommends \
-    libpgroonga && \
-    # Cleanup
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* /tmp/*.deb
-
-# Configure PostgreSQL to load PGroonga
-RUN echo "shared_preload_libraries = 'pgroonga'" >> /usr/share/postgresql/postgresql.conf.sample
+ENV PGROONGA_VERSION=4.0.5-1
+ENV POSTGRESQL_VERSION=16
+RUN \
+  apt update && \
+  apt install -y -V lsb-release wget && \
+  wget https://apache.jfrog.io/artifactory/arrow/debian/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && \
+  apt install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && \
+  rm apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && \
+  wget https://packages.groonga.org/debian/groonga-apt-source-latest-$(lsb_release --codename --short).deb && \
+  apt install -y -V ./groonga-apt-source-latest-$(lsb_release --codename --short).deb && \
+  rm groonga-apt-source-latest-$(lsb_release --codename --short).deb && \
+  apt update && \
+  apt install -y -V \
+    postgresql-${POSTGRESQL_VERSION}-pgdg-pgroonga=${PGROONGA_VERSION} \
+    groonga-normalizer-mysql \
+    groonga-token-filter-stem \
+    groonga-tokenizer-mecab && \
+  apt clean && \
+  rm -rf /var/lib/apt/lists/*
