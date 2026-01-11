@@ -203,10 +203,24 @@ class CrawlerService:
         url: str,
         depth: int = 0,
         max_depth: int = 3,
+        startup_mode: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        """Execute actual crawling: fetch page, extract links, store results."""
+        """Execute actual crawling: fetch page, extract links, store results.
+        
+        Args:
+            job_id: Job ID
+            session_id: Session ID
+            domain: Domain being crawled
+            url: URL to crawl
+            depth: Current depth in crawl tree
+            max_depth: Maximum depth allowed
+            startup_mode: If True, skip link extraction and queue generation.
+                         Only analyze page content. Used for processing existing
+                         pending jobs at startup.
+        """
         job_key = job_id[:8]
-        logger.info(f"🔄 [{job_key}] Starting execution for {url}")
+        logger.info(f"🔄 [{job_key}] Starting execution for {url}" + 
+                   (" (startup mode - no link extraction)" if startup_mode else ""))
         
         try:
             # Fetch the page
@@ -233,10 +247,10 @@ class CrawlerService:
                 await self.update_crawl_job_status(job_id, "failed")
                 return None
             
-            # Extract links for next crawl depth
+            # Extract links for next crawl depth (ONLY if not in startup_mode)
             extracted_links = []
             
-            if depth < max_depth:
+            if not startup_mode and depth < max_depth:
                 try:
                     logger.info(f"🔍 [{job_key}] Extracting links from {url}")
                     extractor = LinkExtractor(url)
@@ -281,6 +295,8 @@ class CrawlerService:
                 
                 except Exception as e:
                     logger.warning(f"[{job_key}] Link extraction failed: {e}")
+            elif startup_mode:
+                logger.info(f"⏭️  [{job_key}] Startup mode: skipping link extraction")
             else:
                 logger.info(f"🛑 [{job_key}] Max depth ({max_depth}) reached, no more links will be extracted")
             
@@ -298,6 +314,7 @@ class CrawlerService:
                     job.metadata_json = {
                         "links_extracted": len(extracted_links),
                         "analysis_id": analysis.analysis_id if analysis else None,
+                        "startup_mode": startup_mode,
                     }
                     await db.commit()
                     logger.debug(f"[{job_key}] Job marked as completed in DB")
@@ -313,6 +330,7 @@ class CrawlerService:
                 "links_extracted": len(extracted_links),
                 "analysis_id": analysis.analysis_id if analysis else None,
                 "urls_to_crawl": extracted_links,
+                "startup_mode": startup_mode,
             }
         
         except Exception as e:
