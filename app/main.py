@@ -6,11 +6,13 @@ from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select, func
 
-from app.core.database import init_db, close_db
+from app.core.database import init_db, close_db, get_db_session
 from app.core.cache import init_redis, close_redis
 from app.api import router
 from app.services.crawl_worker import crawl_worker
+from app.db.models import CrawlJob
 
 # Configure logging
 logging.basicConfig(
@@ -42,6 +44,56 @@ app.add_middleware(
 app.include_router(router.router, prefix="/api")
 
 
+# ==================== DIAGNOSTICS ====================
+
+async def check_pending_jobs() -> dict:
+    """Check pending jobs in database."""
+    try:
+        async with get_db_session() as db:
+            # Count all jobs by status
+            stmt = select(func.count(CrawlJob.job_id)).where(
+                CrawlJob.status == "pending"
+            )
+            result = await db.execute(stmt)
+            pending_count = result.scalar() or 0
+            
+            stmt = select(func.count(CrawlJob.job_id)).where(
+                CrawlJob.status == "completed"
+            )
+            result = await db.execute(stmt)
+            completed_count = result.scalar() or 0
+            
+            stmt = select(func.count(CrawlJob.job_id)).where(
+                CrawlJob.status == "processing"
+            )
+            result = await db.execute(stmt)
+            processing_count = result.scalar() or 0
+            
+            stmt = select(func.count(CrawlJob.job_id)).where(
+                CrawlJob.status == "failed"
+            )
+            result = await db.execute(stmt)
+            failed_count = result.scalar() or 0
+            
+            return {
+                "pending": pending_count,
+                "completed": completed_count,
+                "processing": processing_count,
+                "failed": failed_count,
+                "total": pending_count + completed_count + processing_count + failed_count,
+            }
+    except Exception as e:
+        logger.error(f"\u274c Failed to check pending jobs: {e}")
+        return {
+            "error": str(e),
+            "pending": 0,
+            "completed": 0,
+            "processing": 0,
+            "failed": 0,
+            "total": 0,
+        }
+
+
 # ==================== STARTUP HANDLERS ====================
 
 @app.on_event("startup")
@@ -58,6 +110,7 @@ async def startup_event():
         logger.info("✅ Database initialized")
     except Exception as e:
         logger.error(f"❌ Database initialization failed: {e}")
+        return
     
     # Connect to Redis cache
     logger.info("🙋 Connecting to Redis cache...")
@@ -67,14 +120,36 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Redis connection failed: {e}")
     
+    # Check pending jobs
+    logger.info("🔍 Checking pending jobs in database...")
+    try:
+        job_stats = await check_pending_jobs()
+        logger.info(
+            f"📋 Database Job Stats: "
+            f"total={job_stats['total']}, "
+            f"pending={job_stats['pending']}, "
+            f"processing={job_stats['processing']}, "
+            f"completed={job_stats['completed']}, "
+            f"failed={job_stats['failed']}"
+        )
+    except Exception as e:
+        logger.error(f"❌ Failed to retrieve job stats: {e}")
+    
     # Start crawl worker
     logger.info("🤖 Starting crawl worker...")
     try:
         # Set worker to running state BEFORE creating task
         crawl_worker.is_running = True
+        logger.info(
+            f"🔒 Worker configuration: "
+            f"max_concurrent_jobs={crawl_worker.max_concurrent_jobs}, "
+            f"poll_interval={crawl_worker.poll_interval}s"
+        )
         # Create background task for worker
         worker_task = asyncio.create_task(crawl_worker.worker_loop())
         logger.info("✅ Crawl worker task created and running")
+        # Give worker a moment to start polling
+        await asyncio.sleep(1.0)
     except Exception as e:
         logger.error(f"❌ Crawl worker startup failed: {e}")
         crawl_worker.is_running = False
@@ -94,6 +169,11 @@ async def shutdown_event():
     try:
         # Signal worker to stop
         crawl_worker.is_running = False
+        logger.info(
+            f"💾 Final worker stats: "
+            f"active_jobs={len(crawl_worker.active_jobs)}, "
+            f"is_running={crawl_worker.is_running}"
+        )
         
         # Wait for active jobs to complete (with timeout)
         if crawl_worker.active_jobs:
@@ -161,6 +241,9 @@ async def health():
     worker_status = "operational" if crawl_worker.is_running else "stopped"
     active_jobs = len(crawl_worker.active_jobs)
     
+    # Check pending jobs
+    job_stats = await check_pending_jobs()
+    
     return {
         "status": "healthy",
         "version": "1.0.0",
@@ -169,13 +252,16 @@ async def health():
             "search": "operational",
             "crawl_worker": worker_status,
             "active_crawl_jobs": active_jobs,
-        }
+        },
+        "database_stats": job_stats,
     }
 
 
 @app.get("/admin")
 async def admin_overview():
     """Admin panel overview and API endpoints summary."""
+    job_stats = await check_pending_jobs()
+    
     return {
         "title": "Transparent Search Admin Panel",
         "worker_status": {
@@ -184,6 +270,7 @@ async def admin_overview():
             "max_concurrent_jobs": crawl_worker.max_concurrent_jobs,
             "poll_interval": crawl_worker.poll_interval,
         },
+        "database_stats": job_stats,
         "api_endpoints": {
             "search": {
                 "base": "/api/search",
