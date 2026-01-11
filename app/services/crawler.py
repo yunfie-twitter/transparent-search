@@ -249,6 +249,18 @@ class CrawlerService:
             html_content = response.text
             logger.debug(f"[{job_key}] Fetched {len(html_content)} bytes")
             
+            # ✅ STORE HTML CONTENT IN DATABASE
+            logger.debug(f"[{job_key}] Storing HTML content to database")
+            async with get_db_session() as db:
+                stmt = select(CrawlJob).where(CrawlJob.job_id == job_id)
+                result = await db.execute(stmt)
+                job = result.scalar_one_or_none()
+                
+                if job:
+                    job.content = html_content  # ✅ Store fetched HTML
+                    await db.commit()
+                    logger.debug(f"[{job_key}] Stored {len(html_content)} bytes of HTML content")
+            
             # Analyze the page
             logger.debug(f"[{job_key}] Analyzing page content")
             analysis = await self.analyze_page(job_id, url, html_content)
@@ -326,6 +338,7 @@ class CrawlerService:
                         "links_extracted": len(extracted_links),
                         "analysis_id": analysis.analysis_id if analysis else None,
                         "startup_mode": startup_mode,
+                        "content_size": len(html_content),
                     }
                     await db.commit()
                     logger.debug(f"[{job_key}] Job marked as completed in DB")
