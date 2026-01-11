@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI
@@ -24,12 +23,32 @@ logger = logging.getLogger(__name__)
 worker_task: Optional[asyncio.Task] = None
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """FastAPI lifespan context manager for startup and shutdown."""
+app = FastAPI(
+    title="Transparent Search API",
+    description="Advanced web crawling and intelligent search indexing",
+    version="1.0.0",
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include API router
+app.include_router(router.router, prefix="/api")
+
+
+# ==================== STARTUP HANDLERS ====================
+
+@app.on_event("startup")
+async def startup_event():
+    """Application startup event handler."""
     global worker_task
     
-    # Startup
     logger.info("🚀 Starting Transparent Search application...")
     
     # Initialize database
@@ -38,7 +57,7 @@ async def lifespan(app: FastAPI):
         await init_db()
         logger.info("✅ Database initialized")
     except Exception as e:
-        logger.warning(f"⚠️ Database initialization warning: {e}")
+        logger.error(f"❌ Database initialization failed: {e}")
     
     # Connect to Redis cache
     logger.info("🙋 Connecting to Redis cache...")
@@ -46,27 +65,28 @@ async def lifespan(app: FastAPI):
         await init_redis()
         logger.info("✅ Redis cache connected")
     except Exception as e:
-        logger.warning(f"⚠️ Redis connection warning: {e}")
+        logger.error(f"❌ Redis connection failed: {e}")
     
     # Start crawl worker
     logger.info("🤖 Starting crawl worker...")
     try:
-        # Set worker to running state
+        # Set worker to running state BEFORE creating task
         crawl_worker.is_running = True
         # Create background task for worker
         worker_task = asyncio.create_task(crawl_worker.worker_loop())
-        logger.info("✅ Crawl worker started (background task created)")
-        # Give worker time to start processing
-        await asyncio.sleep(0.5)
+        logger.info("✅ Crawl worker task created and running")
     except Exception as e:
         logger.error(f"❌ Crawl worker startup failed: {e}")
         crawl_worker.is_running = False
     
-    logger.info("🌟 Application ready")
+    logger.info("🌟 Application startup complete")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Application shutdown event handler."""
+    global worker_task
     
-    yield
-    
-    # Shutdown
     logger.info("🙋 Shutting down application...")
     
     # Stop crawl worker
@@ -108,7 +128,7 @@ async def lifespan(app: FastAPI):
         await close_redis()
         logger.info("✅ Redis cache disconnected")
     except Exception as e:
-        logger.warning(f"⚠️ Redis shutdown warning: {e}")
+        logger.error(f"❌ Redis shutdown error: {e}")
     
     # Close database
     logger.info("🙋 Disconnecting from database...")
@@ -116,30 +136,12 @@ async def lifespan(app: FastAPI):
         await close_db()
         logger.info("✅ Database disconnected")
     except Exception as e:
-        logger.warning(f"⚠️ Database shutdown warning: {e}")
+        logger.error(f"❌ Database shutdown error: {e}")
     
     logger.info("🙋 Application shutdown complete")
 
 
-app = FastAPI(
-    title="Transparent Search API",
-    description="Advanced web crawling and intelligent search indexing",
-    version="1.0.0",
-    lifespan=lifespan,
-)
-
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Include API router
-app.include_router(router.router, prefix="/api")
-
+# ==================== ENDPOINTS ====================
 
 @app.get("/")
 async def root():
