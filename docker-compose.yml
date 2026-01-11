@@ -1,8 +1,8 @@
 services:
   # PostgreSQL Database with PGroonga full-text search
-  # 🔍 Image: pgroonga/pgroonga:latest-debian (includes PGroonga extension)
+  # 🔍 Image: groonga/pgroonga (official Groonga organization)
   postgres:
-    image: pgroonga/pgroonga:latest-debian
+    image: groonga/pgroonga:16-bullseye-slim
     container_name: transparent_search_db
     environment:
       POSTGRES_USER: postgres
