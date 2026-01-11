@@ -7,6 +7,7 @@ import random
 
 from app.core.database import get_db
 from app.services.crawler import crawler_service
+from app.services.crawl_worker import crawl_worker
 from app.db.models import CrawlSession, CrawlJob
 
 logger = logging.getLogger(__name__)
@@ -322,6 +323,51 @@ async def get_crawl_stats(
         }
     except Exception as e:
         logger.error(f"Error getting stats for {domain}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/worker/status")
+async def get_worker_status():
+    """
+    Get current crawl worker status and metrics.
+    
+    Returns:
+        Worker status including active jobs, queue stats, and performance metrics
+    """
+    try:
+        status = await crawl_worker.get_worker_status()
+        return {
+            "status": "success",
+            "worker": status,
+        }
+    except Exception as e:
+        logger.error(f"Error getting worker status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/worker/session/{session_id}")
+async def get_worker_session_stats(session_id: str):
+    """
+    Get crawl worker statistics for a specific session.
+    
+    Args:
+        session_id: Crawl session ID
+        
+    Returns:
+        Session statistics including job counts and progress
+    """
+    try:
+        stats = await crawl_worker.get_session_stats(session_id)
+        if not stats:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {
+            "status": "success",
+            "session": stats,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting session stats for {session_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
