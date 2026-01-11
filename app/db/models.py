@@ -19,7 +19,7 @@ class CrawlSession(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    session_metadata = Column(JSON, nullable=True)  # Changed from 'metadata' (reserved word)
     
     # Relationships
     jobs = relationship("CrawlJob", back_populates="session", cascade="all, delete-orphan")
