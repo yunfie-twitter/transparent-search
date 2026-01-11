@@ -2,7 +2,7 @@
 from sqlalchemy import Column, String, Integer, DateTime, Float, Boolean, Text, JSON, ForeignKey, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
-from .database import Base
+from app.core.database import Base
 import uuid
 
 
@@ -192,4 +192,36 @@ class PageAnalysis(Base):
         Index("idx_total_score", "total_score"),
         Index("idx_spam_score", "spam_score"),
         Index("idx_relevance", "relevance_score"),
+    )
+
+
+class SearchContent(Base):
+    """Indexed search content."""
+    __tablename__ = "search_content"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    url = Column(String(2048), nullable=False, unique=True, index=True)
+    domain = Column(String(255), nullable=False, index=True)
+    title = Column(String(500), nullable=True)
+    description = Column(Text, nullable=True)
+    h1 = Column(String(500), nullable=True)
+    h2_tags = Column(JSON, nullable=True)  # List of H2 headings
+    meta_description = Column(String(500), nullable=True)
+    content = Column(Text, nullable=True)  # Full page content
+    content_type = Column(String(100), nullable=True, index=True)  # text_article, video, image, etc.
+    quality_score = Column(Float, default=0.5, index=True)  # 0.0-1.0
+    
+    # Metadata
+    og_title = Column(String(500), nullable=True)
+    og_description = Column(Text, nullable=True)
+    og_image_url = Column(String(2048), nullable=True)
+    
+    # Timestamps
+    indexed_at = Column(DateTime, default=datetime.utcnow, index=True)
+    last_crawled_at = Column(DateTime, nullable=True)
+    
+    __table_args__ = (
+        Index("idx_domain_type", "domain", "content_type"),
+        Index("idx_quality", "quality_score"),
+        Index("idx_indexed_at", "indexed_at"),
     )
