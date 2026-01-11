@@ -1,5 +1,12 @@
 FROM postgres:16-bookworm
 
+# Install ca-certificates first to avoid SSL verification errors
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install PGroonga dependencies and PGroonga itself
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
