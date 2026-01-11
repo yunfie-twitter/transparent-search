@@ -15,7 +15,7 @@ from app.routers import (
     sitemap_admin,
     suggest,
 )
-from app.api import crawler_router
+from app.api.crawler_router import router as crawler_router
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ router.include_router(advanced_search.router, prefix="/search", tags=["search"])
 logger.info("✅ Registered: /api/search (advanced)")
 
 # Crawler routers
-router.include_router(crawler_router.router, prefix="/crawl", tags=["crawl"])
+router.include_router(crawler_router, prefix="/crawl", tags=["crawl"])
 logger.info("✅ Registered: /api/crawl")
 
 # Admin routers
