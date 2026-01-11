@@ -4,9 +4,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
-from app.db.database import get_db
+from app.core.database import get_db
 from app.utils.intent_detector import IntentDetector
-from app.cache import get_redis_client
+from app.core.cache import get_redis_client
 import time
 
 router = APIRouter()
