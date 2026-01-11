@@ -1,0 +1,23 @@
+FROM postgres:16-bookworm
+
+# Install PGroonga dependencies and PGroonga itself
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    gnupg \
+    apt-transport-https && \
+    # Add Groonga repository
+    curl https://packages.groonga.org/debian/groonga-apt-source-latest-bookworm.deb -o /tmp/groonga-apt-source.deb && \
+    dpkg -i /tmp/groonga-apt-source.deb && \
+    # Add Apache Arrow repository (required for PGroonga)
+    curl https://apache.jfrog.io/artifactory/arrow/debian/apache-arrow-apt-source-latest-bookworm.deb -o /tmp/arrow-apt-source.deb && \
+    dpkg -i /tmp/arrow-apt-source.deb && \
+    apt-get update && \
+    # Install PGroonga
+    apt-get install -y --no-install-recommends \
+    postgresql-16-pgroonga && \
+    # Cleanup
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/*.deb
+
+RUN echo "shared_preload_libraries = 'pgroonga'" >> /usr/share/postgresql/postgresql.conf.sample
