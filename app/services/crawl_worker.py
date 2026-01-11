@@ -109,10 +109,15 @@ class CrawlWorker:
                         f"📬 Found {len(jobs)} pending jobs "
                         f"(available slots: {self.max_concurrent_jobs - len(self.active_jobs)})"
                     )
+                else:
+                    logger.debug(
+                        f"ℹ️ No pending jobs (available slots: {self.max_concurrent_jobs - len(self.active_jobs)})"
+                    )
+                
                 return list(jobs)
         
         except Exception as e:
-            logger.error(f"❌ Error fetching pending jobs: {e}")
+            logger.error(f"❌ Error fetching pending jobs: {e}", exc_info=True)
             return []
     
     async def process_job(self, job: CrawlJob) -> bool:
@@ -131,6 +136,23 @@ class CrawlWorker:
         try:
             logger.info(f"🔄 Processing job {job_key}: {job.url} (depth: {job.depth})")
             self.metrics.total_processed += 1
+            
+            # Mark job as processing in database BEFORE starting
+            try:
+                async with get_db_session() as db:
+                    stmt = select(CrawlJob).where(CrawlJob.job_id == job_id)
+                    result = await db.execute(stmt)
+                    job_to_update = result.scalar_one_or_none()
+                    
+                    if job_to_update:
+                        job_to_update.status = "processing"
+                        job_to_update.started_at = datetime.utcnow()
+                        await db.commit()
+                        logger.debug(f"[{job_key}] Job marked as 'processing' in DB")
+            except Exception as db_err:
+                logger.error(f"[{job_key}] Failed to mark job as processing: {db_err}")
+                self.metrics.total_failed += 1
+                return False
             
             # Execute the actual crawl
             result = await crawler_service.execute_crawl_job(
@@ -167,8 +189,14 @@ class CrawlWorker:
         
         except Exception as e:
             execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
-            logger.error(f"❌ Error processing job {job_key}: {e} (execution time: {execution_time:.0f}ms)")
-            await crawler_service.update_crawl_job_status(job.job_id, "failed")
+            logger.error(f"❌ Error processing job {job_key}: {e} (execution time: {execution_time:.0f}ms)", exc_info=True)
+            
+            # Try to mark job as failed
+            try:
+                await crawler_service.update_crawl_job_status(job.job_id, "failed")
+            except Exception as update_err:
+                logger.error(f"[{job_key}] Failed to mark job as failed: {update_err}")
+            
             self.metrics.total_failed += 1
             return False
     
@@ -210,7 +238,7 @@ class CrawlWorker:
             }
         
         except Exception as e:
-            logger.error(f"❌ Error getting worker status: {e}")
+            logger.error(f"❌ Error getting worker status: {e}", exc_info=True)
             return {}
     
     async def get_session_stats(self, session_id: str) -> Dict[str, Any]:
@@ -266,7 +294,7 @@ class CrawlWorker:
                 return stats
         
         except Exception as e:
-            logger.error(f"❌ Error getting session stats: {e}")
+            logger.error(f"❌ Error getting session stats: {e}", exc_info=True)
             return {}
     
     async def worker_loop(self):
@@ -322,9 +350,11 @@ class CrawlWorker:
                     for job_id in completed:
                         try:
                             result = self.active_jobs[job_id].result()
-                            logger.debug(f"✨ Job {job_id[:8]} task completed")
+                            logger.debug(f"✨ Job {job_id[:8]} task completed (result: {result})")
+                        except asyncio.CancelledError:
+                            logger.warning(f"⚠️ Job {job_id[:8]} task was cancelled")
                         except Exception as e:
-                            logger.error(f"❌ Job {job_id[:8]} task failed: {e}")
+                            logger.error(f"❌ Job {job_id[:8]} task error: {e}")
                         finally:
                             del self.active_jobs[job_id]
                     
