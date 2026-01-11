@@ -6,13 +6,13 @@ RUN apt-get update && \
     curl \
     gnupg \
     apt-transport-https && \
-    # Add Groonga repository key
+    # Add Groonga repository
     curl -L https://packages.groonga.org/debian/groonga-apt-source-latest-bookworm.deb -o /tmp/groonga-apt-source.deb && \
     dpkg -i /tmp/groonga-apt-source.deb && \
     apt-get update && \
-    # Install PGroonga for PostgreSQL 16
+    # Install PGroonga library
     apt-get install -y --no-install-recommends \
-    postgresql-16-pgroonga && \
+    libpgroonga && \
     # Cleanup
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/*.deb
