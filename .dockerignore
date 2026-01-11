@@ -1,0 +1,18 @@
+# Exclude old Alpine-based build files
+alpine/
+
+# Standard exclusions
+.git
+.gitignore
+.DS_Store
+*.md
+node_modules
+__pycache__
+*.pyc
+.env
+.venv
+venv/
+.pytest_cache
+.coverage
+dist/
+build/
