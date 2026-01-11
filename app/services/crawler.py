@@ -16,7 +16,7 @@ from app.db.models import (
     CrawlSession, CrawlJob, CrawlMetadata, PageAnalysis
 )
 from app.utils.metadata_analyzer import metadata_analyzer
-from app.utils.page_value_scorer import page_value_scorer
+from app.utils.page_value_scorer import page_value_scorer, LinkMetrics
 from app.utils.spam_detector import spam_detector
 from app.utils.query_intent_analyzer import query_intent_analyzer
 
@@ -346,24 +346,40 @@ class CrawlerService:
                 logger.warning(f"Cache write failed (non-critical): {cache_err}")
             
             logger.debug(f"[{job_key}] Calculating page value score")
+            
+            # Create LinkMetrics for scoring
+            link_metrics = LinkMetrics(
+                depth_from_root=0,  # Simplified - would calculate from path
+                internal_link_count=0,  # Simplified - would track
+                external_backlink_estimate=0,  # Simplified - would estimate
+                outgoing_internal_links=0,  # Simplified - would count
+                outgoing_external_links=0,  # Simplified - would count
+            )
+            
+            # Create ContentMetrics for scoring
+            from app.utils.page_value_scorer import ContentMetrics
+            content_metrics = ContentMetrics(
+                has_structured_data=bool(metadata.get("structured_data")),
+                is_article=metadata.get("page_type") == "article",
+                has_publish_date=bool(metadata.get("publish_date")),
+                has_author=bool(metadata.get("author")),
+                has_og_tags=bool(metadata.get("og_title")),
+                word_count=metadata.get("word_count", 0),
+                headings_count=metadata.get("headings_count", 0),
+                has_meta_description=bool(metadata.get("description")),
+            )
+            
+            # Calculate score with proper arguments
             score = page_value_scorer.score_page(
                 url=url,
-                content_metrics={
-                    "has_structured_data": bool(metadata.get("structured_data")),
-                    "is_article": metadata.get("page_type") == "article",
-                    "has_publish_date": bool(metadata.get("publish_date")),
-                    "has_author": bool(metadata.get("author")),
-                    "has_og_tags": bool(metadata.get("og_title")),
-                    "word_count": metadata.get("word_count", 0),
-                    "headings_count": metadata.get("headings_count", 0),
-                    "has_meta_description": bool(metadata.get("description")),
-                },
+                link_metrics=link_metrics,
+                content_metrics=content_metrics,
             )
             
             try:
                 cache = await self._get_cache()
                 if cache:
-                    await cache.set_score(url, score.get("total_score", 50.0))
+                    await cache.set_score(url, score.total_score)
             except Exception as cache_err:
                 logger.warning(f"Cache write failed (non-critical): {cache_err}")
             
@@ -385,9 +401,9 @@ class CrawlerService:
                     analysis_id=analysis_id,
                     job_id=job_id,
                     url=url,
-                    total_score=score.get("total_score", 50.0),
-                    crawl_priority=score.get("crawl_priority", 5),
-                    recommendation=score.get("recommendation", "CRAWL_LATER"),
+                    total_score=score.total_score,
+                    crawl_priority=score.crawl_priority,
+                    recommendation=score.recommendation,
                     spam_score=spam_report.get("spam_score", 0.0),
                     risk_level=spam_report.get("risk_level", "clean"),
                     query_intent=intent.get("primary_intent"),
@@ -398,7 +414,7 @@ class CrawlerService:
                 await db.commit()
                 await db.refresh(analysis)
             
-            logger.info(f"📊 [{job_key}] Analyzed: {url} (score: {score.get('total_score', 50.0):.1f})")
+            logger.info(f"📊 [{job_key}] Analyzed: {url} (score: {score.total_score:.1f})")
             return analysis
         
         except Exception as e:
