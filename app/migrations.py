@@ -11,7 +11,8 @@ Handles both:
 import logging
 import asyncio
 
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect
+from sqlalchemy.schema import CreateIndex
 from app.core.database import engine, Base
 from app.db.models import CrawlSession, CrawlJob, CrawlMetadata, PageAnalysis, SearchContent
 
@@ -25,8 +26,27 @@ def _get_table_names(connection):
 
 
 def _create_all_tables(connection):
-    """Create all tables (sync function for run_sync)."""
+    """Create all tables and indexes with if_not_exists.
+    
+    Strategy:
+    1. Create tables with if_not_exists=True (idempotent)
+    2. Manually create indexes with if_not_exists=True (prevents duplicates)
+    
+    Why manual index creation:
+    - Base.metadata.create_all() doesn't support if_not_exists for indexes
+    - Must manually iterate and create each index with if_not_exists
+    - This prevents "relation already exists" errors
+    """
+    # First, create all tables (idempotent)
     Base.metadata.create_all(connection)
+    
+    # Then, manually create all indexes with if_not_exists=True
+    for table in Base.metadata.sorted_tables:
+        for index in table.indexes:
+            # CreateIndex with if_not_exists=True prevents duplicate index errors
+            create_index = CreateIndex(index, if_not_exists=True)
+            connection.execute(create_index)
+            logger.debug(f"   Index created: {index.name}")
 
 
 def _create_missing_tables(connection, missing_tables):
@@ -35,6 +55,12 @@ def _create_missing_tables(connection, missing_tables):
         if table.name in missing_tables:
             logger.info(f"   Creating table: {table.name}")
             table.create(connection, checkfirst=True)
+            
+            # Also create indexes for this table with if_not_exists
+            for index in table.indexes:
+                create_index = CreateIndex(index, if_not_exists=True)
+                connection.execute(create_index)
+                logger.debug(f"   Index created: {index.name}")
 
 
 async def run_migrations():
@@ -45,10 +71,9 @@ async def run_migrations():
     2. If fresh DB: create all tables + indexes (via Base.metadata.create_all)
     3. If existing DB: skip (tables already exist with indexes)
     
-    Why this approach:
-    - SQLAlchemy's create_all() is idempotent for tables
-    - But composite indexes can fail if they already exist
-    - Better to check first and only create what's missing
+    Key Fix:
+    - CreateIndex(index, if_not_exists=True) prevents duplicate index errors
+    - This is idempotent and safe for re-runs
     
     AsyncConnection Note:
     - AsyncConnection doesn't support inspect() directly
