@@ -2,7 +2,7 @@
 """Pre-startup initialization script for Transparent Search.
 
 This script ensures critical initialization happens BEFORE Uvicorn starts,
-including database setup, Redis connection, and worker startup.
+including database setup, Redis connection, and test job creation.
 """
 
 import asyncio
@@ -10,8 +10,7 @@ import logging
 import sys
 
 from app.core.database import init_db, get_db_session
-from app.core.cache import init_redis
-from app.services.crawl_worker import crawl_worker
+from app.core.cache import init_crawl_cache
 from app.services.crawler import crawler_service
 from sqlalchemy import select, func
 from app.db.models import CrawlJob, CrawlSession
@@ -80,8 +79,8 @@ async def create_test_jobs():
         # Create a test crawl session
         session = await crawler_service.create_crawl_session(
             domain="momon-ga.com",
-            max_depth=3,
-            page_limit=100
+            max_depth=2,  # Reduced for faster demo
+            page_limit=50
         )
         logger.info(f"✅ Created session: {session.session_id}")
         
@@ -91,7 +90,7 @@ async def create_test_jobs():
             domain="momon-ga.com",
             url="https://momon-ga.com",
             depth=0,
-            max_depth=3,
+            max_depth=2,
             enable_js_rendering=False,
         )
         logger.info(f"✅ Created job: {job.job_id} for {job.url}")
@@ -116,13 +115,12 @@ async def startup_tasks():
         return False
 
     # Connect to Redis cache
-    logger.info("🙋 Connecting to Redis cache...")
+    logger.info("🎯 Connecting to Redis cache...")
     try:
-        await init_redis()
+        await init_crawl_cache()
         logger.info("✅ Redis cache connected")
     except Exception as e:
-        logger.error(f"❌ Redis connection failed: {e}")
-        return False
+        logger.warning(f"⚠️ Redis connection failed (non-critical): {e}")
 
     # Check pending jobs
     logger.info("🔍 Checking pending jobs in database...")
@@ -138,8 +136,8 @@ async def startup_tasks():
         )
         
         # If no pending jobs, create test jobs
-        if job_stats['pending'] == 0:
-            logger.info("😵 No pending jobs found, creating test jobs...")
+        if job_stats['pending'] == 0 and job_stats['total'] == 0:
+            logger.info("🛰 No jobs found, creating test jobs...")
             test_created = await create_test_jobs()
             if test_created:
                 # Re-check stats after creating test jobs
@@ -154,7 +152,7 @@ async def startup_tasks():
                 )
         
         if job_stats['pending'] > 0:
-            logger.info(f"🔄 Will process {job_stats['pending']} pending job(s) when worker starts")
+            logger.info(f"🔵 Worker will process {job_stats['pending']} pending job(s) on startup")
     except Exception as e:
         logger.error(f"❌ Failed to retrieve job stats: {e}")
 
@@ -174,7 +172,7 @@ def main():
             sys.exit(1)
 
         logger.info("✅ All startup tasks completed successfully")
-        logger.info("🎯 Ready to start Uvicorn server")
+        logger.info("🌟 Ready to start Uvicorn server")
         return True
 
     except Exception as e:
