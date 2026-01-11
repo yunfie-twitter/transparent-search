@@ -2,6 +2,7 @@ FROM postgres:16-trixie
 
 ENV PGROONGA_VERSION=4.0.5-1
 ENV POSTGRESQL_VERSION=16
+
 RUN \
   apt update && \
   apt install -y -V lsb-release wget && \
@@ -19,3 +20,6 @@ RUN \
     groonga-tokenizer-mecab && \
   apt clean && \
   rm -rf /var/lib/apt/lists/*
+
+# Configure PostgreSQL to load PGroonga extension on startup
+RUN echo "shared_preload_libraries = 'pgroonga'" >> /etc/postgresql-common/createcluster.conf
