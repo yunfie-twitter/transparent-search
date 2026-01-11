@@ -5,6 +5,8 @@ from app.core.cache import (
     close_redis,
     get_redis_client,
     CacheManager,
+    crawl_cache,
+    init_crawl_cache,
 )
 from app.core.database import (
     engine,
@@ -28,6 +30,8 @@ __all__ = [
     "close_redis",
     "get_redis_client",
     "CacheManager",
+    "crawl_cache",
+    "init_crawl_cache",
     # Database
     "engine",
     "async_session",
