@@ -4,6 +4,7 @@ Revision ID: 001
 Revises: None
 Create Date: 2026-01-10
 
+
 """
 from typing import Sequence, Union
 
@@ -31,8 +32,8 @@ def upgrade() -> None:
         sa.Column('completed_at', sa.DateTime(), nullable=True),
         sa.Column('session_metadata', sa.JSON(), nullable=True),
         sa.PrimaryKeyConstraint('session_id'),
-        sa.Index('idx_domain_status', 'domain', 'status'),
-        sa.Index('idx_created_at', 'created_at'),
+        sa.Index('idx_crawl_sessions_domain_status', 'domain', 'status'),
+        sa.Index('idx_crawl_sessions_created_at', 'created_at'),
     )
 
     # Create crawl_jobs table
@@ -70,11 +71,11 @@ def upgrade() -> None:
         sa.Column('completed_at', sa.DateTime(), nullable=True),
         sa.PrimaryKeyConstraint('job_id'),
         sa.ForeignKeyConstraint(['session_id'], ['crawl_sessions.session_id'], ),
-        sa.Index('idx_domain_status', 'domain', 'status'),
-        sa.Index('idx_created_at', 'created_at'),
-        sa.Index('idx_page_value', 'page_value_score'),
-        sa.Index('idx_spam_score', 'spam_score'),
-        sa.Index('idx_priority_status', 'priority', 'status'),
+        sa.Index('idx_crawl_jobs_domain_status', 'domain', 'status'),
+        sa.Index('idx_crawl_jobs_created_at', 'created_at'),
+        sa.Index('idx_crawl_jobs_page_value', 'page_value_score'),
+        sa.Index('idx_crawl_jobs_spam_score', 'spam_score'),
+        sa.Index('idx_crawl_jobs_priority_status', 'priority', 'status'),
     )
 
     # Create crawl_metadata table
@@ -111,8 +112,8 @@ def upgrade() -> None:
         sa.Column('extracted_at', sa.DateTime(), nullable=True),
         sa.PrimaryKeyConstraint('metadata_id'),
         sa.ForeignKeyConstraint(['job_id'], ['crawl_jobs.job_id'], ),
-        sa.Index('idx_job_url', 'job_id', 'url'),
-        sa.Index('idx_extracted_at', 'extracted_at'),
+        sa.Index('idx_crawl_metadata_job_url', 'job_id', 'url'),
+        sa.Index('idx_crawl_metadata_extracted_at', 'extracted_at'),
     )
 
     # Create page_analysis table
@@ -147,10 +148,10 @@ def upgrade() -> None:
         sa.Column('analyzed_at', sa.DateTime(), nullable=True),
         sa.PrimaryKeyConstraint('analysis_id'),
         sa.ForeignKeyConstraint(['job_id'], ['crawl_jobs.job_id'], ),
-        sa.Index('idx_job_url', 'job_id', 'url'),
-        sa.Index('idx_total_score', 'total_score'),
-        sa.Index('idx_spam_score', 'spam_score'),
-        sa.Index('idx_relevance', 'relevance_score'),
+        sa.Index('idx_page_analysis_job_url', 'job_id', 'url'),
+        sa.Index('idx_page_analysis_total_score', 'total_score'),
+        sa.Index('idx_page_analysis_spam_score', 'spam_score'),
+        sa.Index('idx_page_analysis_relevance', 'relevance_score'),
     )
 
 
