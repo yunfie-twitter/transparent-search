@@ -20,7 +20,10 @@ router = APIRouter(
 
 @router.post("/start")
 async def start_crawl(
-    domain: str = Query(..., min_length=1),
+    domain: str = Query(..., min_length=1, description="Target domain to crawl"),
+    page_limit: int = Query(100, ge=1, le=10000, description="Maximum number of pages to crawl"),
+    max_depth: int = Query(3, ge=1, le=15, description="Maximum crawl depth"),
+    include_existing: bool = Query(False, description="Include existing crawled pages in the page count"),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -28,18 +31,47 @@ async def start_crawl(
     
     Args:
         domain: Target domain to crawl
+        page_limit: Maximum number of pages to crawl (default: 100)
+        max_depth: Maximum crawl depth (default: 3, max: 15)
+        include_existing: Include existing crawled pages in the page count (default: false)
         db: Database session
         
     Returns:
-        Crawl session details with session_id
+        Crawl session details with session_id and configuration
     """
     try:
-        session = await crawler_service.create_crawl_session(domain=domain)
+        # Get existing page count if needed
+        existing_count = 0
+        if include_existing:
+            stmt = select(func.count()).select_from(CrawlJob).where(
+                CrawlJob.domain == domain
+            )
+            result = await db.execute(stmt)
+            existing_count = result.scalar() or 0
+            
+            # Adjust page_limit to account for existing pages
+            actual_limit = max(1, page_limit - existing_count)
+        else:
+            actual_limit = page_limit
+        
+        # Create crawl session with configuration
+        session = await crawler_service.create_crawl_session(
+            domain=domain,
+            max_depth=max_depth,
+            page_limit=actual_limit
+        )
+        
         return {
             "status": "success",
             "session_id": session.session_id,
             "domain": session.domain,
             "created_at": session.created_at.isoformat() if hasattr(session, 'created_at') else None,
+            "configuration": {
+                "page_limit": actual_limit,
+                "max_depth": max_depth,
+                "include_existing": include_existing,
+                "existing_page_count": existing_count,
+            }
         }
     except Exception as e:
         logger.error(f"Error starting crawl for {domain}: {e}")
@@ -97,6 +129,7 @@ async def create_job(
 async def auto_crawl(
     max_jobs: int = Query(1, ge=1, le=100),
     max_depth: int = Query(3, ge=1, le=15),
+    page_limit: int = Query(100, ge=1, le=10000),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -105,6 +138,7 @@ async def auto_crawl(
     Args:
         max_jobs: Maximum number of jobs to create per call
         max_depth: Maximum crawl depth for each job
+        page_limit: Maximum number of pages per job
         db: Database session
         
     Returns:
@@ -128,8 +162,12 @@ async def auto_crawl(
         created_jobs = []
         for domain in selected_domains:
             try:
-                # Create session
-                session = await crawler_service.create_crawl_session(domain=domain)
+                # Create session with configuration
+                session = await crawler_service.create_crawl_session(
+                    domain=domain,
+                    max_depth=max_depth,
+                    page_limit=page_limit
+                )
                 
                 # Create initial crawl job for domain root
                 base_url = f"https://{domain}"
@@ -147,6 +185,8 @@ async def auto_crawl(
                     "session_id": session.session_id,
                     "job_id": job.job_id,
                     "url": job.url,
+                    "max_depth": max_depth,
+                    "page_limit": page_limit,
                 })
                 logger.info(f"✅ Auto-created job for {domain}")
             except Exception as e:
@@ -164,6 +204,10 @@ async def auto_crawl(
             "message": f"Auto-crawl started for {len(created_jobs)} site(s)",
             "total_domains": len(domains),
             "crawled_domains": len(created_jobs),
+            "configuration": {
+                "max_depth": max_depth,
+                "page_limit": page_limit,
+            },
             "jobs": created_jobs,
         }
     except HTTPException:
@@ -249,7 +293,7 @@ async def get_crawl_stats(
         db: Database session
         
     Returns:
-        Crawl statistics (session count, job count)
+        Crawl statistics (session count, job count, pages crawled)
     """
     try:
         # Count sessions
@@ -271,6 +315,10 @@ async def get_crawl_stats(
             "domain": domain,
             "total_sessions": session_count,
             "total_jobs": job_count,
+            "statistics": {
+                "pages_crawled": job_count,
+                "sessions_active": session_count,
+            }
         }
     except Exception as e:
         logger.error(f"Error getting stats for {domain}: {e}")
