@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
 from app.db.models import CrawlJob, SearchContent, PageAnalysis
-from app.utils.content_classifier import content_classifier
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +57,41 @@ class HTMLMetadataExtractor(HTMLParser):
         self.current_tag = None
 
 
+class ContentClassifier:
+    """Simple content type classifier based on URL patterns."""
+    
+    @staticmethod
+    def classify_by_url(url: str) -> str:
+        """Classify content type based on URL pattern.
+        
+        Args:
+            url: URL to classify
+        
+        Returns:
+            Content type string (default: 'text_article')
+        """
+        url_lower = url.lower()
+        
+        # Detect by URL patterns
+        if any(x in url_lower for x in [".mp4", ".webm", ".mov", "/video", "/videos"]):
+            return "video"
+        elif any(x in url_lower for x in [".jpg", ".png", ".gif", ".webp", "/image", "/images"]):
+            return "image"
+        elif any(x in url_lower for x in [".pdf", "/pdf"]):
+            return "pdf"
+        elif any(x in url_lower for x in ["/github", "/gitlab", "/bitbucket"]):
+            return "code_repository"
+        elif any(x in url_lower for x in ["/twitter", "/facebook", "/instagram", "/tiktok"]):
+            return "social_media"
+        else:
+            return "text_article"
+
+
 class ContentIndexer:
     """Index crawled content for search."""
+    
+    def __init__(self):
+        self.classifier = ContentClassifier()
     
     async def index_crawl_job(
         self,
@@ -117,12 +149,8 @@ class ContentIndexer:
                 analysis = analysis_result.scalar_one_or_none()
                 
                 # Classify content
-                content_type = "unknown"
-                try:
-                    classification = content_classifier.classify_by_url(url)
-                    content_type = classification.get("type", "unknown")
-                except Exception as e:
-                    logger.warning(f"[{job_key}] Classification failed: {e}")
+                content_type = self.classifier.classify_by_url(url)
+                logger.debug(f"[{job_key}] Classified as: {content_type}")
                 
                 # Determine quality score
                 quality_score = 0.5
@@ -131,7 +159,7 @@ class ContentIndexer:
                 elif job.page_value_score:
                     quality_score = job.page_value_score / 100
                 
-                # Create SearchContent record
+                # Create SearchContent record (without metadata_json)
                 now = datetime.utcnow()
                 search_content = SearchContent(
                     url=url,
@@ -149,13 +177,15 @@ class ContentIndexer:
                     og_image_url=extractor.og_image_url,
                     indexed_at=now,
                     last_crawled_at=job.completed_at or now,
-                    metadata_json={
-                        "job_id": job_id,
-                        "session_id": session_id,
-                        "crawl_depth": job.depth,
-                        "analysis_id": analysis.analysis_id if analysis else None,
-                    },
                 )
+                
+                # Store metadata in CrawlJob instead
+                job.metadata_json = {
+                    "indexed_at": now.isoformat(),
+                    "content_type": content_type,
+                    "quality_score": quality_score,
+                    "analysis_id": analysis.analysis_id if analysis else None,
+                }
                 
                 db.add(search_content)
                 await db.commit()
