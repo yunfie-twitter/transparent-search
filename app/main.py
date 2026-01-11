@@ -102,6 +102,68 @@ async def check_pending_jobs() -> dict:
         }
 
 
+async def auto_index_startup_jobs():
+    """Auto-index any completed jobs that aren't indexed yet."""
+    logger.info("📋 Auto-indexing startup CrawlJobs...")
+    
+    try:
+        from app.services.indexer import content_indexer
+        from app.db.models import SearchContent
+        
+        async with get_db_session() as db:
+            # Get all completed jobs
+            stmt = select(CrawlJob).where(CrawlJob.status == "completed")
+            result = await db.execute(stmt)
+            jobs = result.scalars().all()
+            
+            total = len(jobs)
+            indexed = 0
+            skipped = 0
+            failed = 0
+            
+            if total == 0:
+                logger.info("📋 No completed CrawlJobs to index")
+                return
+            
+            logger.info(f"📋 Found {total} completed CrawlJobs to index")
+            
+            for idx, job in enumerate(jobs, 1):
+                # Check if already indexed
+                existing = await db.execute(
+                    select(SearchContent).where(
+                        SearchContent.url == job.url
+                    )
+                )
+                
+                if existing.scalar_one_or_none():
+                    skipped += 1
+                    continue
+                
+                # Index the job
+                indexed_content = await content_indexer.index_crawl_job(
+                    job_id=job.job_id,
+                    session_id=job.session_id,
+                    domain=job.domain,
+                    url=job.url,
+                )
+                
+                if indexed_content:
+                    indexed += 1
+                else:
+                    failed += 1
+                
+                # Log progress every 10 jobs
+                if idx % 10 == 0:
+                    logger.debug(f"📋 Auto-index progress: {idx}/{total} (indexed={indexed}, skipped={skipped})")
+            
+            logger.info(
+                f"✅ Auto-indexing complete: indexed={indexed}, skipped={skipped}, failed={failed}, total={total}"
+            )
+    
+    except Exception as e:
+        logger.error(f"❌ Auto-indexing failed: {e}", exc_info=True)
+
+
 # ==================== STARTUP HANDLERS ====================
 
 @app.on_event("startup")
@@ -127,6 +189,13 @@ async def startup_event():
         logger.info("✅ Redis cache connected")
     except Exception as e:
         logger.error(f"❌ Redis connection failed: {e}")
+    
+    # Auto-index startup jobs
+    logger.info("📋 Processing startup queue...")
+    try:
+        await auto_index_startup_jobs()
+    except Exception as e:
+        logger.error(f"❌ Auto-indexing failed: {e}")
     
     # Check pending jobs
     logger.info("🔍 Checking pending jobs in database...")
