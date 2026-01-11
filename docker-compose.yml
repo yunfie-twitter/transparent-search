@@ -1,8 +1,8 @@
 services:
-  # PostgreSQL Database
-  # ⚠️ NOTE: Ports NOT exposed - only accessible within container network
+  # PostgreSQL Database with PGroonga full-text search
+  # 🔍 Image: pgroonga/pgroonga:latest-debian (includes PGroonga extension)
   postgres:
-    image: postgres:16-alpine
+    image: pgroonga/pgroonga:latest-debian
     container_name: transparent_search_db
     environment:
       POSTGRES_USER: postgres
