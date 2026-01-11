@@ -20,6 +20,7 @@ class HTMLMetadataExtractor(HTMLParser):
     
     def __init__(self):
         super().__init__()
+        self.title: Optional[str] = None
         self.h1_tags: List[str] = []
         self.h2_tags: List[str] = []
         self.meta_description: Optional[str] = None
@@ -32,7 +33,9 @@ class HTMLMetadataExtractor(HTMLParser):
     def handle_starttag(self, tag: str, attrs: List[tuple]):
         self.current_tag = tag
         
-        if tag == "meta":
+        if tag == "title" and not self.title:
+            self.current_text = ""
+        elif tag == "meta":
             attrs_dict = dict(attrs)
             if attrs_dict.get("name") == "description":
                 self.meta_description = attrs_dict.get("content")
@@ -44,11 +47,16 @@ class HTMLMetadataExtractor(HTMLParser):
                 self.og_image_url = attrs_dict.get("content")
     
     def handle_data(self, data: str):
-        if self.current_tag in ("h1", "h2"):
+        if self.current_tag == "title":
+            self.current_text += data.strip()
+        elif self.current_tag in ("h1", "h2"):
             self.current_text += data.strip()
     
     def handle_endtag(self, tag: str):
-        if tag == "h1" and self.current_text:
+        if tag == "title" and self.current_text and not self.title:
+            self.title = self.current_text.strip()[:200]  # Limit to 200 chars
+            self.current_text = ""
+        elif tag == "h1" and self.current_text:
             self.h1_tags.append(self.current_text.strip())
             self.current_text = ""
         elif tag == "h2" and self.current_text:
@@ -92,6 +100,31 @@ class ContentIndexer:
     
     def __init__(self):
         self.classifier = ContentClassifier()
+    
+    def _extract_title(self, extractor: HTMLMetadataExtractor, url: str) -> str:
+        """Extract best available title from page metadata.
+        
+        Args:
+            extractor: HTMLMetadataExtractor with extracted metadata
+            url: URL for fallback title generation
+        
+        Returns:
+            Best available title or URL as fallback
+        """
+        # Priority order: og:title > title tag > h1 > domain
+        if extractor.og_title:
+            return extractor.og_title[:200]
+        elif extractor.title:
+            return extractor.title[:200]
+        elif extractor.h1_tags:
+            return extractor.h1_tags[0][:200]
+        else:
+            # Fallback: use domain/path
+            parsed = urlparse(url)
+            path_parts = [p for p in parsed.path.split('/') if p]
+            if path_parts:
+                return path_parts[-1].replace('-', ' ').replace('_', ' ')[:200]
+            return parsed.netloc or url
     
     async def index_crawl_job(
         self,
@@ -159,13 +192,17 @@ class ContentIndexer:
                 elif job.page_value_score:
                     quality_score = job.page_value_score / 100
                 
-                # Create SearchContent record (without metadata_json)
+                # ✅ Extract title using priority chain
+                title = self._extract_title(extractor, url)
+                logger.debug(f"[{job_key}] Extracted title: {title}")
+                
+                # Create SearchContent record
                 now = datetime.utcnow()
                 search_content = SearchContent(
                     url=url,
                     domain=domain,
-                    title=job.title or "Untitled",
-                    description=job.description or "",
+                    title=title,  # ✅ Use extracted title
+                    description=extractor.meta_description or "",  # Use meta description
                     content=html_content[:10000] if html_content else "",  # Store first 10K chars
                     content_type=content_type,
                     quality_score=quality_score,
@@ -179,11 +216,17 @@ class ContentIndexer:
                     last_crawled_at=job.completed_at or now,
                 )
                 
-                # Store metadata in CrawlJob instead
+                # Store metadata in CrawlJob
                 job.metadata_json = {
                     "indexed_at": now.isoformat(),
                     "content_type": content_type,
                     "quality_score": quality_score,
+                    "title_source": (
+                        "og:title" if extractor.og_title else
+                        "title_tag" if extractor.title else
+                        "h1" if extractor.h1_tags else
+                        "url_path"
+                    ),
                     "analysis_id": analysis.analysis_id if analysis else None,
                 }
                 
@@ -193,7 +236,7 @@ class ContentIndexer:
                 
                 logger.info(
                     f"✅ [{job_key}] Indexed: {url} "
-                    f"(type={content_type}, score={quality_score:.2f})"
+                    f"(type={content_type}, score={quality_score:.2f}, title='{title[:50]}...')"
                 )
                 return search_content
         
