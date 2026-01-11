@@ -12,8 +12,9 @@ import sys
 from app.core.database import init_db, get_db_session
 from app.core.cache import init_redis
 from app.services.crawl_worker import crawl_worker
+from app.services.crawler import crawler_service
 from sqlalchemy import select, func
-from app.db.models import CrawlJob
+from app.db.models import CrawlJob, CrawlSession
 
 # Configure logging
 logging.basicConfig(
@@ -71,6 +72,36 @@ async def check_pending_jobs() -> dict:
         }
 
 
+async def create_test_jobs():
+    """Create test crawl jobs for worker to process."""
+    try:
+        logger.info("🤓 Creating test crawl session and jobs...")
+        
+        # Create a test crawl session
+        session = await crawler_service.create_crawl_session(
+            domain="momon-ga.com",
+            max_depth=3,
+            page_limit=100
+        )
+        logger.info(f"✅ Created session: {session.session_id}")
+        
+        # Create initial job for domain root
+        job = await crawler_service.create_crawl_job(
+            session_id=session.session_id,
+            domain="momon-ga.com",
+            url="https://momon-ga.com",
+            depth=0,
+            max_depth=3,
+            enable_js_rendering=False,
+        )
+        logger.info(f"✅ Created job: {job.job_id} for {job.url}")
+        
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to create test jobs: {e}")
+        return False
+
+
 async def startup_tasks():
     """Run all startup tasks before Uvicorn starts."""
     logger.info("🚀 Pre-startup initialization beginning...")
@@ -105,6 +136,23 @@ async def startup_tasks():
             f"completed={job_stats['completed']}, "
             f"failed={job_stats['failed']}"
         )
+        
+        # If no pending jobs, create test jobs
+        if job_stats['pending'] == 0:
+            logger.info("😵 No pending jobs found, creating test jobs...")
+            test_created = await create_test_jobs()
+            if test_created:
+                # Re-check stats after creating test jobs
+                job_stats = await check_pending_jobs()
+                logger.info(
+                    f"📋 Updated Job Stats: "
+                    f"total={job_stats['total']}, "
+                    f"pending={job_stats['pending']}, "
+                    f"processing={job_stats['processing']}, "
+                    f"completed={job_stats['completed']}, "
+                    f"failed={job_stats['failed']}"
+                )
+        
         if job_stats['pending'] > 0:
             logger.info(f"🔄 Will process {job_stats['pending']} pending job(s) when worker starts")
     except Exception as e:
