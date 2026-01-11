@@ -1,4 +1,11 @@
-version: '3.8'
+# ================================================================
+# Docker Compose Configuration for Transparent Search
+# ================================================================
+# 
+# NOTE: The 'version' attribute is deprecated in modern Docker Compose.
+#       It is completely ignored by Docker Compose v2+.
+#       Removed to avoid confusion and follow current best practices.
+#
 
 services:
   # ================================================================
@@ -88,6 +95,11 @@ services:
   #   - Host cannot directly access DB or Cache (intentional)
   #   - Only port 8080 bridges to host machine
   #
+  # Startup Sequence:
+  #   1. DB and Cache must pass healthchecks before app starts
+  #   2. python -m app.migrations runs database initialization
+  #   3. FastAPI server starts and is ready for requests
+  #
   transparent_search_app:
     build:
       context: .
@@ -111,6 +123,9 @@ services:
       - app_network
     volumes:
       - .:/app
+    # 📝 Startup command:
+    #    1. python -m app.migrations    - Initialize database schema
+    #    2. uvicorn ...                 - Start FastAPI server
     command: sh -c "python -m app.migrations && python -m uvicorn app.main:app --host 0.0.0.0 --port 8080"
 
 # ================================================================
