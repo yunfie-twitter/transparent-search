@@ -2,6 +2,7 @@
 
 import os
 from typing import Optional
+from urllib.parse import urlparse
 
 # ============================================================================
 # Database Configuration
@@ -16,10 +17,24 @@ DATABASE_URL = os.getenv(
 # Redis/Cache Configuration
 # ============================================================================
 
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_DB = int(os.getenv("REDIS_DB", 0))
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+# Support both REDIS_URL and individual Redis config variables
+REDIS_URL = os.getenv("REDIS_URL", None)
+
+if REDIS_URL:
+    # Parse REDIS_URL if provided
+    parsed = urlparse(REDIS_URL)
+    REDIS_HOST = parsed.hostname or "localhost"
+    REDIS_PORT = parsed.port or 6379
+    REDIS_DB = int(parsed.path.lstrip("/")) if parsed.path else 0
+    # Handle password with colon prefix (redis://:password@host:port)
+    REDIS_PASSWORD = parsed.password if parsed.password else None
+else:
+    # Fall back to individual environment variables
+    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+    REDIS_DB = int(os.getenv("REDIS_DB", 0))
+    REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+
 REDIS_ENABLED = os.getenv("REDIS_ENABLED", "true").lower() == "true"
 
 # Cache TTLs (in seconds)
@@ -82,7 +97,7 @@ class Config:
     SQLALCHEMY_ECHO = os.getenv("SQLALCHEMY_ECHO", "false").lower() == "true"
     
     # Redis
-    REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+    REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}" if REDIS_PASSWORD else f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
     REDIS_ENABLED = REDIS_ENABLED
     
     # Crawler
