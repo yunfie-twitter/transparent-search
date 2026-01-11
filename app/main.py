@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global reference to worker task
-worker_task: asyncio.Task = None
+worker_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
@@ -50,10 +51,14 @@ async def lifespan(app: FastAPI):
     # Start crawl worker
     logger.info("🤖 Starting crawl worker...")
     try:
-        worker_task = asyncio.create_task(crawl_worker.start())
-        logger.info("✅ Crawl worker started")
+        # Set worker to running state
+        crawl_worker.is_running = True
+        # Create background task for worker
+        worker_task = asyncio.create_task(crawl_worker.worker_loop())
+        logger.info("✅ Crawl worker started (background task created)")
     except Exception as e:
-        logger.warning(f"⚠️ Crawl worker startup warning: {e}")
+        logger.error(f"❌ Crawl worker startup failed: {e}")
+        crawl_worker.is_running = False
     
     logger.info("🌟 Application ready")
     
@@ -65,16 +70,35 @@ async def lifespan(app: FastAPI):
     # Stop crawl worker
     logger.info("🤖 Stopping crawl worker...")
     try:
-        await crawl_worker.stop()
+        # Signal worker to stop
+        crawl_worker.is_running = False
+        
+        # Wait for active jobs to complete (with timeout)
+        if crawl_worker.active_jobs:
+            logger.info(f"⏳ Waiting for {len(crawl_worker.active_jobs)} active jobs...")
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*crawl_worker.active_jobs.values(), return_exceptions=True),
+                    timeout=10.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Some jobs did not complete in time")
+        
+        # Wait for worker task to complete
         if worker_task and not worker_task.done():
             try:
                 await asyncio.wait_for(worker_task, timeout=5.0)
             except asyncio.TimeoutError:
-                logger.warning("⚠️ Worker did not stop in time, cancelling...")
+                logger.warning("⚠️ Worker task did not stop in time, cancelling...")
                 worker_task.cancel()
+                try:
+                    await worker_task
+                except asyncio.CancelledError:
+                    pass
+        
         logger.info("✅ Crawl worker stopped")
     except Exception as e:
-        logger.warning(f"⚠️ Crawl worker shutdown warning: {e}")
+        logger.error(f"❌ Crawl worker shutdown error: {e}")
     
     # Close Redis
     logger.info("🙋 Disconnecting from Redis cache...")
