@@ -71,6 +71,7 @@ class CrawlWorker:
         self.active_jobs: Dict[str, asyncio.Task] = {}
         self.job_times: Dict[str, float] = {}  # Track job execution times
         self.metrics = WorkerMetrics()
+        self.is_first_run = True  # Track if this is first startup
     
     async def get_pending_jobs(
         self,
@@ -120,11 +121,13 @@ class CrawlWorker:
             logger.error(f"❌ Error fetching pending jobs: {e}", exc_info=True)
             return []
     
-    async def process_job(self, job: CrawlJob) -> bool:
+    async def process_job(self, job: CrawlJob, startup_mode: bool = False) -> bool:
         """Process a single crawl job with timing tracking.
         
         Args:
             job: CrawlJob to process
+            startup_mode: If True, skip link extraction and queue generation.
+                         Used for processing existing pending jobs at startup.
         
         Returns:
             True if successful, False otherwise
@@ -134,7 +137,10 @@ class CrawlWorker:
         start_time = datetime.utcnow()
         
         try:
-            logger.info(f"🔄 Processing job {job_key}: {job.url} (depth: {job.depth})")
+            logger.info(
+                f"🔄 Processing job {job_key}: {job.url} (depth: {job.depth})" +
+                (" [STARTUP]" if startup_mode else "")
+            )
             self.metrics.total_processed += 1
             
             # Mark job as processing in database BEFORE starting
@@ -154,7 +160,7 @@ class CrawlWorker:
                 self.metrics.total_failed += 1
                 return False
             
-            # Execute the actual crawl
+            # Execute the actual crawl (with startup_mode flag)
             result = await crawler_service.execute_crawl_job(
                 job_id=job.job_id,
                 session_id=job.session_id,
@@ -162,6 +168,7 @@ class CrawlWorker:
                 url=job.url,
                 depth=job.depth,
                 max_depth=job.max_depth,
+                startup_mode=startup_mode,  # Pass startup_mode to crawler
             )
             
             # Calculate execution time
@@ -177,8 +184,8 @@ class CrawlWorker:
                 self.metrics.total_queued += len(urls_to_crawl)
                 
                 logger.info(
-                    f"✅ Job {job_key} completed in {execution_time:.0f}ms "
-                    f"→ {len(urls_to_crawl)} URLs queued"
+                    f"✅ Job {job_key} completed in {execution_time:.0f}ms"
+                    + (f" → {len(urls_to_crawl)} URLs queued" if not startup_mode else " (startup mode)")
                 )
                 self.metrics.total_successful += 1
                 return True
@@ -321,15 +328,23 @@ class CrawlWorker:
                             consecutive_empty_polls = 0
                             adaptive_poll_interval = self.poll_interval
                             
-                            logger.info(
-                                f"📥 Starting {len(pending_jobs)} jobs "
-                                f"(active: {len(self.active_jobs)}/{self.max_concurrent_jobs})"
-                            )
+                            # Determine if we're processing startup queue
+                            startup_mode = self.is_first_run
+                            if startup_mode:
+                                logger.info(f"📥 Starting {len(pending_jobs)} startup queue jobs")
+                                self.is_first_run = False  # Only first run uses startup mode
+                            else:
+                                logger.info(
+                                    f"📥 Starting {len(pending_jobs)} jobs "
+                                    f"(active: {len(self.active_jobs)}/{self.max_concurrent_jobs})"
+                                )
                             
                             # Process jobs concurrently
                             for job in pending_jobs:
                                 if len(self.active_jobs) < self.max_concurrent_jobs:
-                                    task = asyncio.create_task(self.process_job(job))
+                                    task = asyncio.create_task(
+                                        self.process_job(job, startup_mode=startup_mode)
+                                    )
                                     self.active_jobs[job.job_id] = task
                         else:
                             # Adaptive polling: increase interval when queue is empty
