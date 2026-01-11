@@ -1,8 +1,8 @@
 services:
   # PostgreSQL Database with PGroonga full-text search
-  # 🔍 Image: groonga/pgroonga (official Groonga organization)
+  # 🔍 Image: pgroonga/pgroonga (official PGroonga organization)
   postgres:
-    image: groonga/pgroonga:16-bullseye-slim
+    image: pgroonga/pgroonga:latest-alpine
     container_name: transparent_search_db
     environment:
       POSTGRES_USER: postgres
