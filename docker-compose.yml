@@ -1,8 +1,10 @@
 services:
   # PostgreSQL Database with PGroonga full-text search
-  # 🔍 Image: pgroonga/pgroonga (official PGroonga organization)
+  # 🔍 Image: Custom build from Dockerfile.postgres
   postgres:
-    image: pgroonga/pgroonga:latest-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
     container_name: transparent_search_db
     environment:
       POSTGRES_USER: postgres
