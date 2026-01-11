@@ -1,9 +1,8 @@
-"""Initial migration: Create crawl management tables
+"""Initial migration: Create crawl management tables and initialize PGroonga
 
 Revision ID: 001
 Revises: None
 Create Date: 2026-01-10
-
 
 """
 from typing import Sequence, Union
@@ -18,6 +17,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Create PGroonga extension (required for full-text search)
+    # This must be done before creating any PGroonga indexes
+    op.execute("CREATE EXTENSION IF NOT EXISTS pgroonga")
+    op.execute("SELECT pgroonga_version()")
+    
     # Create crawl_sessions table
     op.create_table(
         'crawl_sessions',
@@ -161,3 +165,6 @@ def downgrade() -> None:
     op.drop_table('crawl_metadata')
     op.drop_table('crawl_jobs')
     op.drop_table('crawl_sessions')
+    
+    # Drop PGroonga extension
+    op.execute("DROP EXTENSION IF EXISTS pgroonga CASCADE")
