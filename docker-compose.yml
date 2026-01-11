@@ -1,86 +1,70 @@
+version: '3.8'
+
 services:
-  # PostgreSQL Database with PGroonga full-text search
-  # 🔍 Image: Custom build from Dockerfile.postgres
-  postgres:
-    build:
-      context: .
-      dockerfile: Dockerfile.postgres
-    container_name: transparent_search_db
+  # PostgreSQL Database
+  transparent_search_db:
+    image: postgres:16
+    container_name: transparent_search_postgres
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
       POSTGRES_DB: transparent_search
-    # Removed: ports section - only accessible within transparent_network
+      POSTGRES_USER: app_user
+      POSTGRES_PASSWORD: app_password
+    ports:
+      - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - app_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U app_user -d transparent_search"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - transparent_network
 
   # Redis Cache
-  # ⚠️ NOTE: Ports NOT exposed - only accessible within container network
-  redis:
+  transparent_search_cache:
     image: redis:7-alpine
-    container_name: transparent_search_cache
-    # Removed: ports section - only accessible within transparent_network
-    command: redis-server --appendonly yes --requirepass transparent_search
+    container_name: transparent_search_redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
     volumes:
-      - redis_data:/data
+      - cache_data:/data
+    networks:
+      - app_network
     healthcheck:
-      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - transparent_network
 
   # FastAPI Application
-  # ✅ Main service - exposes port 8080 to the host
-  app:
+  transparent_search_app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: transparent_search_app
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/transparent_search
-      REDIS_URL: redis://:transparent_search@redis:6379
-      ENVIRONMENT: development
+      DATABASE_URL: postgresql+asyncpg://app_user:app_password@transparent_search_db:5432/transparent_search
+      REDIS_URL: redis://transparent_search_cache:6379/0
       LOG_LEVEL: INFO
     ports:
       - "8080:8080"
     depends_on:
-      postgres:
+      transparent_search_db:
         condition: service_healthy
-      redis:
+      transparent_search_cache:
         condition: service_healthy
-    volumes:
-      - ./app:/app/app
-      - ./alembic:/app/alembic
-      - ./main.py:/app/main.py
-      - ./startup.py:/app/startup.py
-    command: >
-      bash -c "
-        echo '🚀 Running database migrations...' &&
-        alembic upgrade head &&
-        echo '✅ Migrations complete' &&
-        echo '🚀 Running pre-startup initialization...' &&
-        python startup.py &&
-        echo '🚀 Starting FastAPI server on port 8080...' &&
-        uvicorn main:app --host 0.0.0.0 --port 8080 --workers 1
-      "
     networks:
-      - transparent_network
+      - app_network
+    volumes:
+      - .:/app
+    command: sh -c "python -m app.migrations && python -m uvicorn app.main:app --host 0.0.0.0 --port 8080"
 
 volumes:
-  postgres_data:
-    driver: local
-  redis_data:
-    driver: local
+  db_data:
+  cache_data:
 
 networks:
-  transparent_network:
+  app_network:
     driver: bridge
