@@ -194,3 +194,131 @@ class CacheManager:
             count += await self.invalidate_pattern(pattern)
         
         return count
+    
+    # Crawler-specific cache methods
+    async def get_metadata(self, url: str) -> Optional[dict]:
+        """Get cached page metadata."""
+        if not self.redis:
+            return None
+        
+        try:
+            cache_key = self._make_cache_key("metadata", url)
+            result = await self.redis.get(cache_key)
+            if result:
+                return json.loads(result)
+        except Exception:
+            pass
+        
+        return None
+    
+    async def set_metadata(self, url: str, metadata: dict, ttl: int = CACHE_TTL_CONTENT):
+        """Cache page metadata."""
+        if not self.redis:
+            return
+        
+        try:
+            cache_key = self._make_cache_key("metadata", url)
+            await self.redis.setex(cache_key, ttl, json.dumps(metadata, default=str))
+        except Exception:
+            pass
+    
+    async def get_score(self, url: str) -> Optional[float]:
+        """Get cached page value score."""
+        if not self.redis:
+            return None
+        
+        try:
+            cache_key = self._make_cache_key("score", url)
+            result = await self.redis.get(cache_key)
+            if result:
+                return float(result)
+        except Exception:
+            pass
+        
+        return None
+    
+    async def set_score(self, url: str, score: float, ttl: int = CACHE_TTL_TRACKER):
+        """Cache page value score."""
+        if not self.redis:
+            return
+        
+        try:
+            cache_key = self._make_cache_key("score", url)
+            await self.redis.setex(cache_key, ttl, json.dumps(score))
+        except Exception:
+            pass
+    
+    async def get_session(self, session_id: str) -> Optional[dict]:
+        """Get cached crawl session."""
+        if not self.redis:
+            return None
+        
+        try:
+            cache_key = f"session:{session_id}"
+            result = await self.redis.get(cache_key)
+            if result:
+                return json.loads(result)
+        except Exception:
+            pass
+        
+        return None
+    
+    async def set_session(self, session_id: str, session_data: dict, ttl: int = 3600):
+        """Cache crawl session."""
+        if not self.redis:
+            return
+        
+        try:
+            cache_key = f"session:{session_id}"
+            await self.redis.setex(cache_key, ttl, json.dumps(session_data, default=str))
+        except Exception:
+            pass
+    
+    async def get_job(self, job_id: str) -> Optional[dict]:
+        """Get cached crawl job."""
+        if not self.redis:
+            return None
+        
+        try:
+            cache_key = f"job:{job_id}"
+            result = await self.redis.get(cache_key)
+            if result:
+                return json.loads(result)
+        except Exception:
+            pass
+        
+        return None
+    
+    async def set_job(self, job_id: str, job_data: dict, ttl: int = 3600):
+        """Cache crawl job."""
+        if not self.redis:
+            return
+        
+        try:
+            cache_key = f"job:{job_id}"
+            await self.redis.setex(cache_key, ttl, json.dumps(job_data, default=str))
+        except Exception:
+            pass
+    
+    async def invalidate_domain(self, domain: str) -> int:
+        """Invalidate all cache for a domain."""
+        if not self.redis:
+            return 0
+        
+        count = 0
+        for pattern in [f"*:{domain}:*", f"session:*", f"job:*"]:
+            count += await self.invalidate_pattern(pattern)
+        
+        return count
+
+
+# Global crawler cache instance
+crawl_cache: Optional[CacheManager] = None
+
+
+async def init_crawl_cache() -> CacheManager:
+    """Initialize global crawler cache instance."""
+    global crawl_cache
+    redis_client = await get_redis_client()
+    crawl_cache = CacheManager(redis_client)
+    return crawl_cache
