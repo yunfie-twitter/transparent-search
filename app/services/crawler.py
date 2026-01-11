@@ -33,8 +33,22 @@ class CrawlerService:
             self.cache = CacheManager(redis_client)
         return self.cache
     
-    async def create_crawl_session(self, domain: str) -> Optional[CrawlSession]:
-        """Create a new crawl session with caching."""
+    async def create_crawl_session(
+        self,
+        domain: str,
+        max_depth: int = 3,
+        page_limit: int = 100,
+    ) -> Optional[CrawlSession]:
+        """Create a new crawl session with caching and configuration.
+        
+        Args:
+            domain: Target domain to crawl
+            max_depth: Maximum crawl depth (default: 3)
+            page_limit: Maximum number of pages to crawl (default: 100)
+        
+        Returns:
+            Created CrawlSession object
+        """
         session_id = str(uuid.uuid4())
         now = datetime.utcnow()
         
@@ -45,6 +59,11 @@ class CrawlerService:
                     domain=domain,
                     status="pending",
                     created_at=now,
+                    metadata_json={
+                        "max_depth": max_depth,
+                        "page_limit": page_limit,
+                        "pages_crawled": 0,
+                    },
                 )
                 db.add(crawl_session)
                 await db.commit()
@@ -60,13 +79,16 @@ class CrawlerService:
                             "session_id": session_id,
                             "domain": domain,
                             "status": "pending",
+                            "max_depth": max_depth,
+                            "page_limit": page_limit,
+                            "pages_crawled": 0,
                             "created_at": now.isoformat(),
                         }
                     )
             except Exception as cache_err:
                 logger.warning(f"Cache operation failed (non-critical): {cache_err}")
             
-            logger.info(f"🙋 Created crawl session: {session_id}")
+            logger.info(f"🙋 Created crawl session: {session_id} (max_depth={max_depth}, page_limit={page_limit})")
             return crawl_session
         
         except Exception as e:
