@@ -402,6 +402,10 @@ class CrawlerService:
                 metadata.get("title", "")
             )
             
+            # ✅ Use attribute access instead of dict.get()
+            # intent is an IntentAnalysis object, not a dict
+            primary_intent = intent.primary_intent.value if intent.primary_intent else None
+            
             # Store analysis
             async with get_db_session() as db:
                 analysis = PageAnalysis(
@@ -413,7 +417,7 @@ class CrawlerService:
                     recommendation=score.recommendation,
                     spam_score=spam_report.spam_score if spam_report else 0.0,
                     risk_level=spam_report.risk_level if spam_report else "clean",
-                    query_intent=intent.get("primary_intent"),
+                    query_intent=primary_intent,
                     relevance_score=0.0,
                     analyzed_at=now,
                 )
