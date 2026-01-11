@@ -59,7 +59,7 @@ class CrawlerService:
                     domain=domain,
                     status="pending",
                     created_at=now,
-                    metadata_json={
+                    session_metadata={
                         "max_depth": max_depth,
                         "page_limit": page_limit,
                         "pages_crawled": 0,
