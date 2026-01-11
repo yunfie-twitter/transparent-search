@@ -50,40 +50,47 @@ async def check_pending_jobs() -> dict:
     """Check pending jobs in database."""
     try:
         async with get_db_session() as db:
-            # Count all jobs by status
+            # Count pending
             stmt = select(func.count(CrawlJob.job_id)).where(
                 CrawlJob.status == "pending"
             )
             result = await db.execute(stmt)
             pending_count = result.scalar() or 0
             
+            # Count completed
             stmt = select(func.count(CrawlJob.job_id)).where(
                 CrawlJob.status == "completed"
             )
             result = await db.execute(stmt)
             completed_count = result.scalar() or 0
             
+            # Count processing
             stmt = select(func.count(CrawlJob.job_id)).where(
                 CrawlJob.status == "processing"
             )
             result = await db.execute(stmt)
             processing_count = result.scalar() or 0
             
+            # Count failed
             stmt = select(func.count(CrawlJob.job_id)).where(
                 CrawlJob.status == "failed"
             )
             result = await db.execute(stmt)
             failed_count = result.scalar() or 0
             
+            # ✅ All scalar() calls complete BEFORE exiting async with block
+            total_count = pending_count + completed_count + processing_count + failed_count
+            
+            # Return while still in session context
             return {
                 "pending": pending_count,
                 "completed": completed_count,
                 "processing": processing_count,
                 "failed": failed_count,
-                "total": pending_count + completed_count + processing_count + failed_count,
+                "total": total_count,
             }
     except Exception as e:
-        logger.error(f"\u274c Failed to check pending jobs: {e}")
+        logger.error(f"❌ Failed to check pending jobs: {e}")
         return {
             "error": str(e),
             "pending": 0,
@@ -113,7 +120,7 @@ async def startup_event():
         return
     
     # Connect to Redis cache
-    logger.info("🙋 Connecting to Redis cache...")
+    logger.info("🎯 Connecting to Redis cache...")
     try:
         await init_redis()
         logger.info("✅ Redis cache connected")
@@ -162,7 +169,7 @@ async def shutdown_event():
     """Application shutdown event handler."""
     global worker_task
     
-    logger.info("🙋 Shutting down application...")
+    logger.info("🛑 Shutting down application...")
     
     # Stop crawl worker
     logger.info("🤖 Stopping crawl worker...")
@@ -203,7 +210,7 @@ async def shutdown_event():
         logger.error(f"❌ Crawl worker shutdown error: {e}")
     
     # Close Redis
-    logger.info("🙋 Disconnecting from Redis cache...")
+    logger.info("🎯 Disconnecting from Redis cache...")
     try:
         await close_redis()
         logger.info("✅ Redis cache disconnected")
@@ -211,14 +218,14 @@ async def shutdown_event():
         logger.error(f"❌ Redis shutdown error: {e}")
     
     # Close database
-    logger.info("🙋 Disconnecting from database...")
+    logger.info("💾 Disconnecting from database...")
     try:
         await close_db()
         logger.info("✅ Database disconnected")
     except Exception as e:
         logger.error(f"❌ Database shutdown error: {e}")
     
-    logger.info("🙋 Application shutdown complete")
+    logger.info("🛑 Application shutdown complete")
 
 
 # ==================== ENDPOINTS ====================
