@@ -85,13 +85,18 @@ class CrawlWorker:
             session_id: Filter by specific session (optional)
         
         Returns:
-            List of pending CrawlJob objects sorted by priority
+            List of pending CrawlJob objects sorted by priority (excluding jobs with NULL URLs)
         """
         try:
             async with get_db_session() as db:
                 # Build query for pending jobs with multi-level priority
+                # IMPORTANT: Filter out jobs with NULL URLs to prevent errors
                 query = select(CrawlJob).where(
-                    CrawlJob.status == "pending"
+                    and_(
+                        CrawlJob.status == "pending",
+                        CrawlJob.url.isnot(None),  # Exclude NULL URLs
+                        CrawlJob.url != "",  # Exclude empty strings
+                    )
                 ).order_by(
                     CrawlJob.depth.asc(),  # Shallower depths first (breadth-first)
                     CrawlJob.priority.asc(),  # Then by priority (lower = higher urgency)
@@ -137,6 +142,16 @@ class CrawlWorker:
         start_time = datetime.utcnow()
         
         try:
+            # VALIDATION: Check URL is valid before processing
+            if not job.url or job.url.strip() == "":
+                logger.error(
+                    f"❌ Job {job_key} has invalid URL: {repr(job.url)}. "
+                    f"Marking as failed."
+                )
+                await crawler_service.update_crawl_job_status(job_id, "failed")
+                self.metrics.total_failed += 1
+                return False
+            
             logger.info(
                 f"🔄 Processing job {job_key}: {job.url} (depth: {job.depth})" +
                 (" [STARTUP]" if startup_mode else "")
