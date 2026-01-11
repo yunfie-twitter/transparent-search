@@ -5,8 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.db.database import init_db
-from app.db.cache import crawl_cache
+from app.core.database import init_db
+from app.core.cache import init_crawl_cache, close_redis, get_redis_client, crawl_cache
 from app.api import router
 
 # Configure logging
@@ -28,9 +28,9 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("✅ Database initialized")
     
-    # Connect to Redis cache
+    # Initialize Redis cache
     logger.info("🙋 Connecting to Redis cache...")
-    await crawl_cache.connect()
+    await init_crawl_cache()
     logger.info("✅ Redis cache connected")
     
     logger.info("🌟 Application ready")
@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     
     # Disconnect from Redis
     logger.info("🙋 Disconnecting from Redis cache...")
-    await crawl_cache.disconnect()
+    await close_redis()
     logger.info("✅ Redis cache disconnected")
     
     logger.info("🙋 Application shutdown complete")
@@ -71,21 +71,23 @@ app.include_router(router, prefix="/api")
 @app.get("/")
 async def root():
     """Root endpoint."""
+    redis_client = await get_redis_client()
     return {
         "status": "ok",
         "name": "Transparent Search API",
         "version": "1.0.0",
         "docs": "/docs",
-        "redis": "connected" if crawl_cache.redis else "disconnected",
+        "redis": "connected" if redis_client else "disconnected",
     }
 
 
 @app.get("/health")
 async def health():
     """Health check endpoint."""
+    redis_client = await get_redis_client()
     return {
         "status": "healthy",
-        "cache": "connected" if crawl_cache.redis else "disconnected",
+        "cache": "connected" if redis_client else "disconnected",
     }
 
 
