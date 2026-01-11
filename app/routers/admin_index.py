@@ -15,6 +15,87 @@ router = APIRouter(prefix="/admin/index", tags=["admin-index"])
 # Indexing Operations
 # ============================================================================
 
+@router.post("/bulk-reindex")
+async def bulk_reindex_all(
+    domain: Optional[str] = Query(None, description="Limit to specific domain"),
+    limit: Optional[int] = Query(None, ge=1, le=10000, description="Max jobs to index"),
+    skip_existing: bool = Query(True, description="Skip already indexed URLs"),
+):
+    """
+    Bulk reindex ALL completed CrawlJobs into SearchContent.
+    
+    This is useful for populating the search index from existing crawl data.
+    Can be called on startup or after imports.
+    
+    Returns statistics on indexing progress.
+    """
+    try:
+        async with get_db_session() as db:
+            # Build query for completed jobs
+            query = select(CrawlJob).where(
+                CrawlJob.status == "completed"
+            )
+            
+            if domain:
+                query = query.where(CrawlJob.domain == domain)
+            
+            if limit:
+                query = query.limit(limit)
+            
+            # Fetch all jobs
+            result = await db.execute(query)
+            jobs = result.scalars().all()
+            
+            total_jobs = len(jobs)
+            indexed_count = 0
+            skipped_count = 0
+            failed_count = 0
+            
+            # Process each job
+            for idx, job in enumerate(jobs, 1):
+                # Check if already indexed
+                if skip_existing:
+                    existing = await db.execute(
+                        select(SearchContent).where(
+                            SearchContent.url == job.url
+                        )
+                    )
+                    if existing.scalar_one_or_none():
+                        skipped_count += 1
+                        continue
+                
+                # Index the job
+                indexed_content = await content_indexer.index_crawl_job(
+                    job_id=job.job_id,
+                    session_id=job.session_id,
+                    domain=job.domain,
+                    url=job.url,
+                )
+                
+                if indexed_content:
+                    indexed_count += 1
+                else:
+                    failed_count += 1
+                
+                # Log progress every 10 jobs
+                if idx % 10 == 0:
+                    print(f"Indexing progress: {idx}/{total_jobs}")
+            
+            return {
+                "status": "bulk_reindex_complete",
+                "total_jobs_found": total_jobs,
+                "indexed": indexed_count,
+                "skipped": skipped_count,
+                "failed": failed_count,
+                "domain_filter": domain,
+                "limit": limit,
+                "skip_existing": skip_existing,
+            }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
 @router.post("/reindex-session")
 async def reindex_session(
     session_id: str = Query(..., description="Session ID to reindex"),
@@ -415,12 +496,24 @@ async def index_statistics():
             pending_result = await db.execute(pending_query)
             pending_jobs = pending_result.scalar() or 0
             
+            # Get completed crawl jobs
+            completed_query = select(func.count(CrawlJob.job_id)).where(
+                CrawlJob.status == "completed"
+            )
+            completed_result = await db.execute(completed_query)
+            completed_jobs = completed_result.scalar() or 0
+            
             return {
                 "indexed_documents": total_docs,
                 "by_content_type": by_type,
                 "top_10_domains": by_domain,
                 "average_quality_score": round(float(avg_quality), 3) if avg_quality else 0.0,
-                "pending_crawl_jobs": pending_jobs,
+                "crawl_jobs": {
+                    "pending": pending_jobs,
+                    "completed": completed_jobs,
+                    "indexed": total_docs,
+                    "not_indexed": completed_jobs - total_docs,
+                },
                 "last_updated": datetime.utcnow().isoformat(),
             }
     
@@ -476,6 +569,9 @@ async def index_api_documentation():
         "title": "Index Management API",
         "version": "1.0",
         "sections": {
+            "bulk_indexing": {
+                "POST /admin/index/bulk-reindex": "Bulk index ALL completed CrawlJobs",
+            },
             "indexing": {
                 "POST /admin/index/reindex-session": "Reindex all jobs in a session",
                 "POST /admin/index/reindex-domain": "Reindex all jobs for a domain",
