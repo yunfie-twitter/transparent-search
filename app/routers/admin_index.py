@@ -3,9 +3,10 @@ from fastapi import APIRouter, HTTPException, Query, Body
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-from app.db.models import SearchContent
-from app.core.database import async_session
+from app.db.models import SearchContent, CrawlJob
+from app.core.database import async_session, get_db_session
 from app.utils.content_classifier import content_classifier
+from app.services.indexer import content_indexer
 from sqlalchemy import select, func, and_, or_
 
 router = APIRouter(prefix="/admin/index", tags=["admin-index"])
@@ -13,6 +14,46 @@ router = APIRouter(prefix="/admin/index", tags=["admin-index"])
 # ============================================================================
 # Indexing Operations
 # ============================================================================
+
+@router.post("/reindex-session")
+async def reindex_session(
+    session_id: str = Query(..., description="Session ID to reindex"),
+    skip_existing: bool = Query(True, description="Skip already indexed URLs"),
+):
+    """
+    Reindex all completed crawl jobs in a session into SearchContent.
+    
+    This converts CrawlJob records to searchable SearchContent.
+    """
+    try:
+        result = await content_indexer.reindex_session(
+            session_id=session_id,
+            skip_existing=skip_existing,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@router.post("/reindex-domain")
+async def reindex_domain(
+    domain: str = Query(..., description="Domain to reindex"),
+    skip_existing: bool = Query(True, description="Skip already indexed URLs"),
+):
+    """
+    Reindex all completed crawl jobs for a domain into SearchContent.
+    
+    This converts CrawlJob records to searchable SearchContent.
+    """
+    try:
+        result = await content_indexer.reindex_domain(
+            domain=domain,
+            skip_existing=skip_existing,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
 
 @router.post("/reindex")
 async def reindex_content(
@@ -29,32 +70,13 @@ async def reindex_content(
     - force: Force reindex even if recently indexed
     """
     try:
-        conditions = []
-        
         if domain:
-            conditions.append(SearchContent.domain == domain)
-        
-        if content_type:
-            conditions.append(SearchContent.content_type == content_type)
-        
-        async with async_session() as session:
-            # Count matching documents
-            count_query = select(func.count(SearchContent.id))
-            if conditions:
-                count_query = count_query.where(and_(*conditions))
-            
-            result = await session.execute(count_query)
-            total_docs = result.scalar() or 0
-            
-            return {
-                "status": "reindex_queued",
-                "documents_to_reindex": total_docs,
-                "domain_filter": domain,
-                "content_type_filter": content_type,
-                "force": force,
-                "message": f"Queued {total_docs} documents for reindexing",
-            }
-    
+            return await reindex_domain(domain=domain, skip_existing=not force)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="domain parameter is required for reindex operation"
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
@@ -103,13 +125,13 @@ async def clear_index(
         if content_type:
             conditions.append(SearchContent.content_type == content_type)
         
-        async with async_session() as session:
+        async with get_db_session() as db:
             # Count before deletion
             count_query = select(func.count(SearchContent.id))
             if conditions:
                 count_query = count_query.where(and_(*conditions))
             
-            result = await session.execute(count_query)
+            result = await db.execute(count_query)
             total_before = result.scalar() or 0
             
             # Delete matching documents
@@ -117,13 +139,13 @@ async def clear_index(
             if conditions:
                 delete_query = delete_query.where(and_(*conditions))
             
-            result = await session.execute(delete_query)
+            result = await db.execute(delete_query)
             items = result.scalars().all()
             
             for item in items:
-                await session.delete(item)
+                await db.delete(item)
             
-            await session.commit()
+            await db.commit()
             
             return {
                 "status": "cleared",
@@ -153,7 +175,7 @@ async def list_contents(
     List indexed content with filtering.
     """
     try:
-        async with async_session() as session:
+        async with get_db_session() as db:
             query = select(SearchContent)
             
             conditions = []
@@ -167,12 +189,25 @@ async def list_contents(
             if conditions:
                 query = query.where(and_(*conditions))
             
-            query = query.limit(limit).offset(offset)
+            # Get total count
+            count_query = select(func.count(SearchContent.id))
+            if conditions:
+                count_query = count_query.where(and_(*conditions))
+            count_result = await db.execute(count_query)
+            total_count = count_result.scalar() or 0
             
-            result = await session.execute(query)
+            # Get paginated results
+            query = query.limit(limit).offset(offset)
+            result = await db.execute(query)
             contents = result.scalars().all()
             
             return {
+                "meta": {
+                    "total": total_count,
+                    "count": len(contents),
+                    "limit": limit,
+                    "offset": offset,
+                },
                 "contents": [
                     {
                         "id": c.id,
@@ -186,7 +221,6 @@ async def list_contents(
                     }
                     for c in contents
                 ],
-                "count": len(contents),
             }
     
     except Exception as e:
@@ -199,9 +233,9 @@ async def get_content(content_id: int):
     Get detailed content information.
     """
     try:
-        async with async_session() as session:
+        async with get_db_session() as db:
             query = select(SearchContent).where(SearchContent.id == content_id)
-            result = await session.execute(query)
+            result = await db.execute(query)
             content = result.scalar_one_or_none()
             
             if not content:
@@ -235,16 +269,16 @@ async def delete_content(content_id: int):
     Delete specific indexed content.
     """
     try:
-        async with async_session() as session:
+        async with get_db_session() as db:
             query = select(SearchContent).where(SearchContent.id == content_id)
-            result = await session.execute(query)
+            result = await db.execute(query)
             content = result.scalar_one_or_none()
             
             if not content:
                 raise HTTPException(status_code=404, detail="Content not found")
             
-            await session.delete(content)
-            await session.commit()
+            await db.delete(content)
+            await db.commit()
             
             return {
                 "status": "deleted",
@@ -264,9 +298,9 @@ async def recrawl_content(content_id: int):
     Mark content for recrawling.
     """
     try:
-        async with async_session() as session:
+        async with get_db_session() as db:
             query = select(SearchContent).where(SearchContent.id == content_id)
-            result = await session.execute(query)
+            result = await db.execute(query)
             content = result.scalar_one_or_none()
             
             if not content:
@@ -347,10 +381,10 @@ async def index_statistics():
     Get comprehensive index statistics.
     """
     try:
-        async with async_session() as session:
+        async with get_db_session() as db:
             # Total documents
             total_query = select(func.count(SearchContent.id))
-            total_result = await session.execute(total_query)
+            total_result = await db.execute(total_query)
             total_docs = total_result.scalar() or 0
             
             # By content type
@@ -358,7 +392,7 @@ async def index_statistics():
                 SearchContent.content_type,
                 func.count(SearchContent.id)
             ).group_by(SearchContent.content_type)
-            type_result = await session.execute(type_query)
+            type_result = await db.execute(type_query)
             by_type = dict(type_result.all())
             
             # By domain (top 10)
@@ -366,19 +400,27 @@ async def index_statistics():
                 SearchContent.domain,
                 func.count(SearchContent.id)
             ).group_by(SearchContent.domain).limit(10)
-            domain_result = await session.execute(domain_query)
+            domain_result = await db.execute(domain_query)
             by_domain = dict(domain_result.all())
             
             # Average quality score
             quality_query = select(func.avg(SearchContent.quality_score))
-            quality_result = await session.execute(quality_query)
+            quality_result = await db.execute(quality_query)
             avg_quality = quality_result.scalar() or 0
             
+            # Get pending crawl jobs
+            pending_query = select(func.count(CrawlJob.job_id)).where(
+                CrawlJob.status == "pending"
+            )
+            pending_result = await db.execute(pending_query)
+            pending_jobs = pending_result.scalar() or 0
+            
             return {
-                "total_documents": total_docs,
+                "indexed_documents": total_docs,
                 "by_content_type": by_type,
                 "top_10_domains": by_domain,
-                "average_quality_score": round(avg_quality, 3),
+                "average_quality_score": round(float(avg_quality), 3) if avg_quality else 0.0,
+                "pending_crawl_jobs": pending_jobs,
                 "last_updated": datetime.utcnow().isoformat(),
             }
     
@@ -435,6 +477,8 @@ async def index_api_documentation():
         "version": "1.0",
         "sections": {
             "indexing": {
+                "POST /admin/index/reindex-session": "Reindex all jobs in a session",
+                "POST /admin/index/reindex-domain": "Reindex all jobs for a domain",
                 "POST /admin/index/reindex": "Reindex content",
                 "POST /admin/index/optimize": "Optimize index performance",
                 "POST /admin/index/clear": "Clear index data (destructive)",
