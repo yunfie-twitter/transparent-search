@@ -51,6 +51,17 @@ class CrawlerService:
     def __init__(self):
         self.cache: Optional[CacheManager] = None
         self.http_client: Optional[httpx.AsyncClient] = None
+        self.indexer = None  # Lazy load indexer
+    
+    async def _get_indexer(self):
+        """Get or initialize indexer service (lazy load to avoid circular imports)."""
+        if self.indexer is None:
+            try:
+                from app.services.indexer import content_indexer
+                self.indexer = content_indexer
+            except Exception as e:
+                logger.warning(f"Indexer initialization failed: {e}")
+        return self.indexer
     
     async def _get_cache(self) -> Optional[CacheManager]:
         """Get or initialize cache instance."""
@@ -296,9 +307,9 @@ class CrawlerService:
                 except Exception as e:
                     logger.warning(f"[{job_key}] Link extraction failed: {e}")
             elif startup_mode:
-                logger.info(f"⏭️  [{job_key}] Startup mode: skipping link extraction")
+                logger.info(f"↩️ [{job_key}] Startup mode: skipping link extraction")
             else:
-                logger.info(f"🛑 [{job_key}] Max depth ({max_depth}) reached, no more links will be extracted")
+                logger.info(f"🚫 [{job_key}] Max depth ({max_depth}) reached, no more links will be extracted")
             
             # Update job status to completed with extracted links
             logger.debug(f"[{job_key}] Updating job with completion status")
@@ -320,6 +331,19 @@ class CrawlerService:
                     logger.debug(f"[{job_key}] Job marked as completed in DB")
                 else:
                     logger.error(f"[{job_key}] Job not found in database!")
+            
+            # Auto-index completed job into SearchContent
+            try:
+                indexer = await self._get_indexer()
+                if indexer:
+                    await indexer.index_crawl_job(
+                        job_id=job_id,
+                        session_id=session_id,
+                        domain=domain,
+                        url=url,
+                    )
+            except Exception as index_err:
+                logger.warning(f"[{job_key}] Auto-indexing failed (non-critical): {index_err}")
             
             logger.info(f"🎉 [{job_key}] Completed: {url}")
             
