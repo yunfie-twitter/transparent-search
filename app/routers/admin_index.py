@@ -3,9 +3,9 @@ from fastapi import APIRouter, HTTPException, Query, Body
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-from ..db.models import SearchContent
-from ..db.database import async_session
-from ..utils.content_classifier import content_classifier
+from app.db.models import SearchContent
+from app.core.database import async_session
+from app.utils.content_classifier import content_classifier
 from sqlalchemy import select, func, and_, or_
 
 router = APIRouter(prefix="/admin/index", tags=["admin-index"])
