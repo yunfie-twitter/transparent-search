@@ -27,6 +27,10 @@ async def bulk_reindex_all(
     This is useful for populating the search index from existing crawl data.
     Can be called on startup or after imports.
     
+    Args:
+        skip_existing: If True (default), skips URLs already in SearchContent.
+                      If False, reindexes everything (useful after cleanup).
+    
     Returns statistics on indexing progress.
     """
     try:
@@ -81,15 +85,68 @@ async def bulk_reindex_all(
                 if idx % 10 == 0:
                     print(f"Indexing progress: {idx}/{total_jobs}")
             
+            # Get current SearchContent count
+            count_query = select(func.count(SearchContent.id))
+            count_result = await db.execute(count_query)
+            total_indexed = count_result.scalar() or 0
+            
             return {
                 "status": "bulk_reindex_complete",
                 "total_jobs_found": total_jobs,
                 "indexed": indexed_count,
                 "skipped": skipped_count,
                 "failed": failed_count,
+                "total_search_content": total_indexed,
                 "domain_filter": domain,
                 "limit": limit,
                 "skip_existing": skip_existing,
+                "note": "If skipped=total_jobs and indexed=0, run: POST /api/admin/index/clear-all then retry with skip_existing=false",
+            }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@router.post("/clear-all")
+async def clear_all_index(
+    confirm: bool = Query(False, description="Confirm deletion (must be true)"),
+):
+    """
+    ⚠️ DANGER: Clear ALL search index content.
+    
+    This deletes ALL SearchContent records.
+    Useful for starting fresh after failed indexing.
+    
+    Args:
+        confirm: Must be True to execute (safety check)
+    """
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Must set confirm=true to execute clear-all operation"
+        )
+    
+    try:
+        async with get_db_session() as db:
+            # Count before deletion
+            count_query = select(func.count(SearchContent.id))
+            count_result = await db.execute(count_query)
+            total_before = count_result.scalar() or 0
+            
+            # Get all items and delete
+            delete_query = select(SearchContent)
+            result = await db.execute(delete_query)
+            items = result.scalars().all()
+            
+            for item in items:
+                await db.delete(item)
+            
+            await db.commit()
+            
+            return {
+                "status": "cleared",
+                "documents_deleted": len(items),
+                "warning": "✅ All SearchContent cleared. Now run: POST /api/admin/index/bulk-reindex?skip_existing=false",
             }
     
     except Exception as e:
@@ -571,6 +628,7 @@ async def index_api_documentation():
         "sections": {
             "bulk_indexing": {
                 "POST /admin/index/bulk-reindex": "Bulk index ALL completed CrawlJobs",
+                "POST /admin/index/clear-all": "Clear ALL search index (dangerous)",
             },
             "indexing": {
                 "POST /admin/index/reindex-session": "Reindex all jobs in a session",
