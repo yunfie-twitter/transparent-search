@@ -1,8 +1,11 @@
 """Web crawler service with Redis caching integration."""
 import logging
 import uuid
-from typing import Optional, List, Dict, Any
+import httpx
+from typing import Optional, List, Dict, Any, Set
 from datetime import datetime
+from urllib.parse import urljoin, urlparse
+from html.parser import HTMLParser
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -20,11 +23,34 @@ from app.utils.query_intent_analyzer import query_intent_analyzer
 logger = logging.getLogger(__name__)
 
 
+class LinkExtractor(HTMLParser):
+    """Extract all links from HTML content."""
+    
+    def __init__(self, base_url: str):
+        super().__init__()
+        self.base_url = base_url
+        self.links: Set[str] = set()
+    
+    def handle_starttag(self, tag: str, attrs: List[tuple]):
+        if tag == 'a':
+            for attr, value in attrs:
+                if attr == 'href' and value:
+                    try:
+                        # Resolve relative URLs
+                        absolute_url = urljoin(self.base_url, value)
+                        # Only keep HTTP(S) URLs
+                        if absolute_url.startswith(('http://', 'https://')):
+                            self.links.add(absolute_url)
+                    except Exception:
+                        pass
+
+
 class CrawlerService:
     """Service for managing crawl operations with caching."""
     
     def __init__(self):
         self.cache: Optional[CacheManager] = None
+        self.http_client: Optional[httpx.AsyncClient] = None
     
     async def _get_cache(self) -> Optional[CacheManager]:
         """Get or initialize cache instance."""
@@ -32,6 +58,18 @@ class CrawlerService:
             redis_client = await get_redis_client()
             self.cache = CacheManager(redis_client)
         return self.cache
+    
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        """Get or initialize HTTP client."""
+        if self.http_client is None:
+            self.http_client = httpx.AsyncClient(
+                timeout=30.0,
+                follow_redirects=True,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            )
+        return self.http_client
     
     async def create_crawl_session(
         self,
@@ -168,6 +206,99 @@ class CrawlerService:
         except Exception as e:
             logger.error(f"❌ Failed to create crawl job: {e}")
             raise
+    
+    async def execute_crawl_job(
+        self,
+        job_id: str,
+        session_id: str,
+        domain: str,
+        url: str,
+        depth: int = 0,
+        max_depth: int = 3,
+    ) -> Optional[Dict[str, Any]]:
+        """Execute actual crawling: fetch page, extract links, store results."""
+        try:
+            # Update job status to running
+            await self.update_crawl_job_status(job_id, "processing")
+            
+            # Fetch the page
+            client = await self._get_http_client()
+            logger.info(f"🌐 Fetching: {url}")
+            
+            response = await client.get(url, follow_redirects=True)
+            response.raise_for_status()
+            
+            html_content = response.text
+            
+            # Analyze the page
+            analysis = await self.analyze_page(job_id, url, html_content)
+            
+            if not analysis:
+                logger.warning(f"⚠️ Failed to analyze {url}")
+                await self.update_crawl_job_status(job_id, "failed")
+                return None
+            
+            # Extract links for next crawl depth
+            crawled_urls = set()
+            extracted_links = []
+            
+            if depth < max_depth:
+                try:
+                    extractor = LinkExtractor(url)
+                    extractor.feed(html_content)
+                    
+                    # Filter links to stay within domain
+                    domain_netloc = urlparse(f"https://{domain}").netloc
+                    
+                    for link in list(extractor.links)[:20]:  # Limit to 20 links per page
+                        link_netloc = urlparse(link).netloc
+                        if link_netloc == domain_netloc or domain_netloc in link_netloc:
+                            extracted_links.append({
+                                "url": link,
+                                "depth": depth + 1,
+                            })
+                            crawled_urls.add(link)
+                    
+                    logger.info(f"🔗 Extracted {len(extracted_links)} internal links from {url}")
+                
+                except Exception as e:
+                    logger.warning(f"Link extraction failed for {url}: {e}")
+            
+            # Store extracted links as metadata
+            async with get_db_session() as db:
+                stmt = select(CrawlJob).where(CrawlJob.job_id == job_id)
+                result = await db.execute(stmt)
+                job = result.scalar_one_or_none()
+                
+                if job:
+                    job.status = "completed"
+                    job.completed_at = datetime.utcnow()
+                    job.urls_to_crawl = extracted_links
+                    job.metadata_json = {
+                        "links_extracted": len(extracted_links),
+                        "analysis_id": analysis.analysis_id if analysis else None,
+                    }
+                    await db.commit()
+            
+            logger.info(f"✅ Completed crawl for {url} (analysis_id: {analysis.analysis_id})")
+            
+            return {
+                "job_id": job_id,
+                "url": url,
+                "status": "completed",
+                "links_extracted": len(extracted_links),
+                "analysis_id": analysis.analysis_id if analysis else None,
+                "urls_to_crawl": extracted_links,
+            }
+        
+        except httpx.HTTPError as e:
+            logger.error(f"❌ HTTP error fetching {url}: {e}")
+            await self.update_crawl_job_status(job_id, "failed")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error executing crawl job {job_id}: {e}")
+            await self.update_crawl_job_status(job_id, "failed")
+            return None
     
     async def analyze_page(
         self,
@@ -313,6 +444,11 @@ class CrawlerService:
             logger.warning(f"Cache invalidation failed (non-critical): {e}")
         
         logger.info(f"♻️ Invalidated cache for domain: {domain}")
+    
+    async def close(self):
+        """Close HTTP client."""
+        if self.http_client:
+            await self.http_client.aclose()
 
 
 # Global service instance
