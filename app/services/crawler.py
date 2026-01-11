@@ -7,8 +7,8 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
-from app.db.database import get_db_session
-from app.db.cache import crawl_cache
+from app.core.database import get_db_session
+from app.core.cache import crawl_cache
 from app.db.models import (
     CrawlSession, CrawlJob, CrawlMetadata, PageAnalysis
 )
