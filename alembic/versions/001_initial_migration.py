@@ -29,7 +29,7 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(), nullable=True),
         sa.Column('started_at', sa.DateTime(), nullable=True),
         sa.Column('completed_at', sa.DateTime(), nullable=True),
-        sa.Column('metadata', sa.JSON(), nullable=True),
+        sa.Column('session_metadata', sa.JSON(), nullable=True),
         sa.PrimaryKeyConstraint('session_id'),
         sa.Index('idx_domain_status', 'domain', 'status'),
         sa.Index('idx_created_at', 'created_at'),
