@@ -55,8 +55,11 @@ class CrawlerService:
     async def _get_cache(self) -> Optional[CacheManager]:
         """Get or initialize cache instance."""
         if self.cache is None:
-            redis_client = await get_redis_client()
-            self.cache = CacheManager(redis_client)
+            try:
+                redis_client = await get_redis_client()
+                self.cache = CacheManager(redis_client)
+            except Exception as e:
+                logger.warning(f"Cache initialization failed: {e}")
         return self.cache
     
     async def _get_http_client(self) -> httpx.AsyncClient:
@@ -77,16 +80,7 @@ class CrawlerService:
         max_depth: int = 3,
         page_limit: int = 100,
     ) -> Optional[CrawlSession]:
-        """Create a new crawl session with caching and configuration.
-        
-        Args:
-            domain: Target domain to crawl
-            max_depth: Maximum crawl depth (default: 3)
-            page_limit: Maximum number of pages to crawl (default: 100)
-        
-        Returns:
-            Created CrawlSession object
-        """
+        """Create a new crawl session with caching and configuration."""
         session_id = str(uuid.uuid4())
         now = datetime.utcnow()
         
@@ -107,7 +101,7 @@ class CrawlerService:
                 await db.commit()
                 await db.refresh(crawl_session)
             
-            # Try to cache session, but don't fail if cache unavailable
+            # Try to cache session
             try:
                 cache = await self._get_cache()
                 if cache:
@@ -147,15 +141,10 @@ class CrawlerService:
         now = datetime.utcnow()
         
         try:
-            # Try to get cached metadata and score, but don't fail if cache unavailable
             page_value_score = 50.0
             try:
                 cache = await self._get_cache()
                 if cache:
-                    cached_metadata = await cache.get_metadata(url)
-                    if cached_metadata:
-                        logger.info(f"✅ Using cached metadata for {url}")
-                    
                     cached_score = await cache.get_score(url)
                     if cached_score:
                         page_value_score = cached_score
@@ -180,7 +169,6 @@ class CrawlerService:
                 await db.commit()
                 await db.refresh(crawl_job)
             
-            # Try to cache job, but don't fail if cache unavailable
             try:
                 cache = await self._get_cache()
                 if cache:
@@ -217,29 +205,38 @@ class CrawlerService:
         max_depth: int = 3,
     ) -> Optional[Dict[str, Any]]:
         """Execute actual crawling: fetch page, extract links, store results."""
+        logger.debug(f"[{job_id}] Starting execution for {url}")
+        
         try:
-            # Update job status to running
+            # Update job status to processing
+            logger.debug(f"[{job_id}] Updating status to 'processing'")
             await self.update_crawl_job_status(job_id, "processing")
             
             # Fetch the page
             client = await self._get_http_client()
-            logger.info(f"🌐 Fetching: {url}")
+            logger.info(f"🌐 [{job_id}] Fetching: {url}")
             
-            response = await client.get(url, follow_redirects=True)
-            response.raise_for_status()
+            try:
+                response = await client.get(url, follow_redirects=True)
+                response.raise_for_status()
+            except httpx.HTTPError as http_err:
+                logger.error(f"❌ [{job_id}] HTTP error: {http_err}")
+                await self.update_crawl_job_status(job_id, "failed")
+                return None
             
             html_content = response.text
+            logger.debug(f"[{job_id}] Fetched {len(html_content)} bytes")
             
             # Analyze the page
+            logger.debug(f"[{job_id}] Analyzing page content")
             analysis = await self.analyze_page(job_id, url, html_content)
             
             if not analysis:
-                logger.warning(f"⚠️ Failed to analyze {url}")
+                logger.warning(f"⚠️ [{job_id}] Failed to analyze {url}")
                 await self.update_crawl_job_status(job_id, "failed")
                 return None
             
             # Extract links for next crawl depth
-            crawled_urls = set()
             extracted_links = []
             
             if depth < max_depth:
@@ -257,14 +254,14 @@ class CrawlerService:
                                 "url": link,
                                 "depth": depth + 1,
                             })
-                            crawled_urls.add(link)
                     
-                    logger.info(f"🔗 Extracted {len(extracted_links)} internal links from {url}")
+                    logger.info(f"🔗 [{job_id}] Extracted {len(extracted_links)} internal links")
                 
                 except Exception as e:
-                    logger.warning(f"Link extraction failed for {url}: {e}")
+                    logger.warning(f"[{job_id}] Link extraction failed: {e}")
             
             # Store extracted links as metadata
+            logger.debug(f"[{job_id}] Updating job with completion status")
             async with get_db_session() as db:
                 stmt = select(CrawlJob).where(CrawlJob.job_id == job_id)
                 result = await db.execute(stmt)
@@ -279,8 +276,11 @@ class CrawlerService:
                         "analysis_id": analysis.analysis_id if analysis else None,
                     }
                     await db.commit()
+                    logger.debug(f"[{job_id}] Job marked as completed in DB")
+                else:
+                    logger.error(f"[{job_id}] Job not found in database!")
             
-            logger.info(f"✅ Completed crawl for {url} (analysis_id: {analysis.analysis_id})")
+            logger.info(f"✅ [{job_id}] Completed crawl for {url}")
             
             return {
                 "job_id": job_id,
@@ -291,13 +291,12 @@ class CrawlerService:
                 "urls_to_crawl": extracted_links,
             }
         
-        except httpx.HTTPError as e:
-            logger.error(f"❌ HTTP error fetching {url}: {e}")
-            await self.update_crawl_job_status(job_id, "failed")
-            return None
         except Exception as e:
-            logger.error(f"❌ Error executing crawl job {job_id}: {e}")
-            await self.update_crawl_job_status(job_id, "failed")
+            logger.error(f"❌ [{job_id}] Error executing crawl job: {e}", exc_info=True)
+            try:
+                await self.update_crawl_job_status(job_id, "failed")
+            except Exception as update_err:
+                logger.error(f"[{job_id}] Failed to update status to failed: {update_err}")
             return None
     
     async def analyze_page(
@@ -311,10 +310,9 @@ class CrawlerService:
             analysis_id = str(uuid.uuid4())
             now = datetime.utcnow()
             
-            # Extract metadata
+            logger.debug(f"[{job_id}] Extracting metadata from page")
             metadata = metadata_analyzer.extract_metadata(html_content, url)
             
-            # Cache metadata (non-critical)
             try:
                 cache = await self._get_cache()
                 if cache:
@@ -322,7 +320,7 @@ class CrawlerService:
             except Exception as cache_err:
                 logger.warning(f"Cache write failed (non-critical): {cache_err}")
             
-            # Calculate page value score
+            logger.debug(f"[{job_id}] Calculating page value score")
             score = page_value_scorer.score_page(
                 url=url,
                 content_metrics={
@@ -337,7 +335,6 @@ class CrawlerService:
                 },
             )
             
-            # Cache score (non-critical)
             try:
                 cache = await self._get_cache()
                 if cache:
@@ -345,14 +342,14 @@ class CrawlerService:
             except Exception as cache_err:
                 logger.warning(f"Cache write failed (non-critical): {cache_err}")
             
-            # Detect spam
+            logger.debug(f"[{job_id}] Detecting spam")
             spam_report = spam_detector.analyze_page(
                 url=url,
                 metadata=metadata,
                 html_content=html_content,
             )
             
-            # Analyze query intent
+            logger.debug(f"[{job_id}] Analyzing query intent")
             intent = query_intent_analyzer.analyze_query(
                 metadata.get("title", "")
             )
@@ -376,11 +373,11 @@ class CrawlerService:
                 await db.commit()
                 await db.refresh(analysis)
             
-            logger.info(f"📁 Analyzed page {url} (score: {score.get('total_score', 50.0):.1f})")
+            logger.info(f"📁 [{job_id}] Analyzed page (score: {score.get('total_score', 50.0):.1f})")
             return analysis
         
         except Exception as e:
-            logger.error(f"❌ Page analysis failed for {url}: {e}")
+            logger.error(f"❌ [{job_id}] Page analysis failed: {e}", exc_info=True)
             return None
     
     async def update_crawl_job_status(
@@ -390,6 +387,8 @@ class CrawlerService:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[CrawlJob]:
         """Update job status and clear cache if needed."""
+        logger.debug(f"[{job_id}] Updating status to '{status}'")
+        
         try:
             async with get_db_session() as db:
                 stmt = select(CrawlJob).where(CrawlJob.job_id == job_id)
@@ -397,6 +396,7 @@ class CrawlerService:
                 job = result.scalar_one_or_none()
                 
                 if not job:
+                    logger.error(f"[{job_id}] Job not found in database!")
                     return None
                 
                 # Update job
@@ -411,6 +411,7 @@ class CrawlerService:
                 
                 await db.commit()
                 await db.refresh(job)
+                logger.debug(f"[{job_id}] Status updated to '{status}' in database")
             
             # Update cache (non-critical)
             try:
@@ -427,11 +428,10 @@ class CrawlerService:
             except Exception as cache_err:
                 logger.warning(f"Cache update failed (non-critical): {cache_err}")
             
-            logger.info(f"🔄 Updated job {job_id} status to {status}")
             return job
         
         except Exception as e:
-            logger.error(f"❌ Job update failed: {e}")
+            logger.error(f"❌ [{job_id}] Job update failed: {e}", exc_info=True)
             return None
     
     async def invalidate_domain_cache(self, domain: str):
