@@ -18,6 +18,25 @@ from app.db.models import CrawlSession, CrawlJob, CrawlMetadata, PageAnalysis, S
 logger = logging.getLogger(__name__)
 
 
+def _get_table_names(connection):
+    """Get existing table names (sync function for run_sync)."""
+    inspector = inspect(connection)
+    return inspector.get_table_names()
+
+
+def _create_all_tables(connection):
+    """Create all tables (sync function for run_sync)."""
+    Base.metadata.create_all(connection)
+
+
+def _create_missing_tables(connection, missing_tables):
+    """Create only missing tables (sync function for run_sync)."""
+    for table in Base.metadata.sorted_tables:
+        if table.name in missing_tables:
+            logger.info(f"   Creating table: {table.name}")
+            table.create(connection, checkfirst=True)
+
+
 async def run_migrations():
     """Run all database migrations and initialization.
     
@@ -30,26 +49,31 @@ async def run_migrations():
     - SQLAlchemy's create_all() is idempotent for tables
     - But composite indexes can fail if they already exist
     - Better to check first and only create what's missing
+    
+    AsyncConnection Note:
+    - AsyncConnection doesn't support inspect() directly
+    - Must use connection.run_sync(callable) to run sync code
+    - This runs the callable in a thread pool executor
     """
     logger.info("🔧 Running database migrations...")
     
     try:
         # Connect to database and check for existing tables
         async with engine.begin() as conn:
-            # Get inspector to check existing tables
-            inspector = inspect(conn)
-            existing_tables = await conn.run_sync(inspector.get_table_names)
+            # Get existing tables using run_sync
+            # inspect() requires sync code, so wrap it with run_sync
+            existing_tables = await conn.run_sync(_get_table_names)
             
-            logger.info(f"📊 Existing tables in database: {existing_tables}")
+            logger.info(f"📚 Existing tables in database: {existing_tables}")
             
             if not existing_tables:
                 # Fresh database: create all tables with indexes
                 logger.info("✨ Fresh database detected - Creating all tables and indexes...")
-                await conn.run_sync(Base.metadata.create_all)
+                await conn.run_sync(_create_all_tables)
                 logger.info("✅ All tables and indexes created successfully")
             else:
                 # Existing database: verify required tables exist
-                logger.info("📁 Existing database detected - Verifying schema...")
+                logger.info("📑 Existing database detected - Verifying schema...")
                 
                 required_tables = {
                     'crawl_sessions',
@@ -64,11 +88,8 @@ async def run_migrations():
                 if missing_tables:
                     logger.warning(f"⚠️  Missing tables: {missing_tables}")
                     logger.info("🔨 Creating missing tables...")
-                    # Only create missing tables
-                    for table in Base.metadata.sorted_tables:
-                        if table.name in missing_tables:
-                            logger.info(f"   Creating table: {table.name}")
-                            table.create(conn, checkfirst=True)
+                    # Create only missing tables
+                    await conn.run_sync(_create_missing_tables, missing_tables)
                 else:
                     logger.info("✅ All required tables exist")
                 
