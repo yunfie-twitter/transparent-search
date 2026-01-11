@@ -1,530 +1,402 @@
 """Admin crawl management endpoints."""
-from fastapi import APIRouter, HTTPException, Query, Body, Depends
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
-import uuid
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
+from typing import Optional, List, Dict, Any
+from datetime import datetime
+import csv
+import json
+import io
 
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, and_
-
-from ..utils.sitemap_manager import sitemap_manager
-from ..utils.content_classifier import content_classifier
-from ..db.database import get_db
-from ..db.models import CrawlJob, CrawlSession
+from app.db.models import CrawlSession, CrawlJob
+from app.core.database import get_db_session
+from app.services.crawler import crawler_service
+from sqlalchemy import select, func, and_
 
 router = APIRouter(prefix="/admin/crawl", tags=["admin-crawl"])
 
-# ============================================================================
-# Crawl Scheduling & Management
-# ============================================================================
 
-@router.post("/schedule")
-async def schedule_crawl(
-    domain: str = Query(..., description="Domain to crawl"),
-    priority: int = Query(5, ge=1, le=10, description="Priority (1=highest, 10=lowest)"),
-    max_pages: int = Query(1000, ge=1, le=100000, description="Max pages to crawl"),
-    depth: int = Query(3, ge=1, le=5, description="Crawl depth"),
-    include_js: bool = Query(False, description="Include JS rendering"),
-    custom_sitemaps: Optional[List[str]] = Query(None, description="Custom sitemap URLs"),
-    db: AsyncSession = Depends(get_db),
+@router.post("/bulk-import")
+async def bulk_import_urls(
+    file: UploadFile = File(..., description="URL list file (CSV, JSON, or TXT)"),
+    domain: Optional[str] = Query(None, description="Filter/validate URLs to specific domain"),
+    max_depth: int = Query(3, ge=1, le=15, description="Max crawl depth"),
+    session_id: Optional[str] = Query(None, description="Add to existing session (optional)"),
 ):
     """
-    Schedule a new crawl for a domain.
+    Bulk import URLs for crawling from file.
     
-    Features:
-    - Auto-detect sitemaps from robots.txt and common paths
-    - Support for custom sitemaps
-    - Priority queue system
-    - Configurable depth and page limits
-    - Optional JS rendering
+    Supported formats:
+    - CSV: url,domain (header optional)
+    - JSON: [{"url": "...", "domain": "..."}, ...] or ["url1", "url2", ...]
+    - TXT: one URL per line
+    
+    Args:
+        file: Upload file containing URLs
+        domain: Optional domain filter (only crawl URLs from this domain)
+        max_depth: Maximum crawl depth for jobs
+        session_id: Optional existing session ID to add jobs to
+    
+    Returns:
+        Import statistics and created session/jobs info
     """
     try:
-        # Get all URLs from sitemaps
-        all_urls, auto_detected = await sitemap_manager.get_all_urls(
-            domain,
-            custom_sitemaps=custom_sitemaps
-        )
+        # Read file content
+        content = await file.read()
+        filename = file.filename or "unknown"
         
-        # Limit to max_pages
-        urls_to_crawl = all_urls[:max_pages]
+        # Parse file based on extension
+        urls_to_crawl = []
         
-        # Create crawl session
-        session_id = str(uuid.uuid4())
-        crawl_session = CrawlSession(
-            session_id=session_id,
-            domain=domain,
-            status="pending",
-            total_pages=len(urls_to_crawl),
-            crawled_pages=0,
-            failed_pages=0,
-            created_at=datetime.utcnow(),
-        )
+        if filename.endswith('.csv'):
+            # Parse CSV
+            lines = content.decode('utf-8').split('\n')
+            reader = csv.reader(lines)
+            
+            # Check if first line is header
+            first_row = next(reader, None)
+            if first_row and (first_row[0].lower() == 'url' or first_row[0].lower() == 'link'):
+                # Skip header
+                pass
+            elif first_row:
+                # First row is data
+                url = first_row[0].strip()
+                if url:
+                    urls_to_crawl.append({
+                        "url": url,
+                        "domain": first_row[1].strip() if len(first_row) > 1 else None,
+                    })
+            
+            # Process remaining rows
+            for row in reader:
+                if row and row[0].strip():
+                    url = row[0].strip()
+                    urls_to_crawl.append({
+                        "url": url,
+                        "domain": row[1].strip() if len(row) > 1 else None,
+                    })
         
-        db.add(crawl_session)
+        elif filename.endswith('.json'):
+            # Parse JSON
+            data = json.loads(content.decode('utf-8'))
+            
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        url = item.get('url') or item.get('link')
+                        domain = item.get('domain')
+                        if url:
+                            urls_to_crawl.append({"url": url, "domain": domain})
+                    elif isinstance(item, str):
+                        if item.strip():
+                            urls_to_crawl.append({"url": item.strip(), "domain": None})
         
-        # Create individual crawl jobs
-        job_ids = []
-        for url in urls_to_crawl:
-            job_id = str(uuid.uuid4())
-            crawl_job = CrawlJob(
-                job_id=job_id,
-                session_id=session_id,
-                domain=domain,
-                url=url,
-                status="pending",
-                priority=priority,
-                max_depth=depth,
-                enable_js_rendering=include_js,
-                created_at=datetime.utcnow(),
+        else:
+            # Parse as plain text (one URL per line)
+            lines = content.decode('utf-8').split('\n')
+            for line in lines:
+                url = line.strip()
+                if url and not url.startswith('#'):
+                    urls_to_crawl.append({"url": url, "domain": None})
+        
+        if not urls_to_crawl:
+            raise HTTPException(status_code=400, detail="No valid URLs found in file")
+        
+        # Extract domains from URLs if not provided
+        from urllib.parse import urlparse
+        processed_urls = []
+        
+        for item in urls_to_crawl:
+            url = item["url"]
+            
+            # Validate URL format
+            if not url.startswith(('http://', 'https://')):
+                url = f"https://{url}"
+            
+            try:
+                parsed = urlparse(url)
+                extracted_domain = parsed.netloc
+            except Exception:
+                continue
+            
+            # Apply domain filter if specified
+            if domain and extracted_domain != domain and not extracted_domain.endswith(f".{domain}"):
+                continue
+            
+            processed_urls.append({
+                "url": url,
+                "domain": item.get("domain") or extracted_domain,
+            })
+        
+        if not processed_urls:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No URLs match domain filter: {domain}" if domain else "No valid URLs after processing"
             )
-            db.add(crawl_job)
-            job_ids.append(job_id)
         
-        await db.commit()
+        # Group by domain
+        domains_map: Dict[str, List[str]] = {}
+        for item in processed_urls:
+            d = item["domain"]
+            if d not in domains_map:
+                domains_map[d] = []
+            domains_map[d].append(item["url"])
         
-        return {
-            "status": "scheduled",
-            "session_id": session_id,
-            "domain": domain,
-            "total_pages": len(urls_to_crawl),
-            "auto_detected_sitemaps": list(auto_detected),
-            "custom_sitemaps": custom_sitemaps or [],
-            "priority": priority,
-            "depth": depth,
-            "js_rendering": include_js,
-            "created_at": datetime.utcnow().isoformat(),
-        }
+        # Create session or use existing
+        async with get_db_session() as db:
+            if session_id:
+                # Use existing session
+                from sqlalchemy import select
+                stmt = select(CrawlSession).where(CrawlSession.session_id == session_id)
+                result = await db.execute(stmt)
+                session = result.scalar_one_or_none()
+                if not session:
+                    raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+            else:
+                # Create new session for first domain
+                first_domain = list(domains_map.keys())[0]
+                session = await crawler_service.create_crawl_session(
+                    domain=first_domain,
+                    max_depth=max_depth,
+                    page_limit=len(processed_urls),
+                )
+            
+            # Create crawl jobs for each URL
+            created_jobs = []
+            failed_urls = []
+            
+            for domain_name, urls in domains_map.items():
+                for url in urls:
+                    try:
+                        job = await crawler_service.create_crawl_job(
+                            session_id=session.session_id,
+                            domain=domain_name,
+                            url=url,
+                            depth=0,
+                            max_depth=max_depth,
+                            enable_js_rendering=False,
+                        )
+                        if job:
+                            created_jobs.append({
+                                "job_id": job.job_id,
+                                "url": url,
+                                "domain": domain_name,
+                                "status": "pending",
+                            })
+                    except Exception as e:
+                        failed_urls.append({"url": url, "error": str(e)})
+            
+            return {
+                "status": "import_complete",
+                "session_id": session.session_id,
+                "session_created": session_id is None,
+                "total_urls": len(processed_urls),
+                "created_jobs": len(created_jobs),
+                "failed_urls": len(failed_urls),
+                "domains_count": len(domains_map),
+                "max_depth": max_depth,
+                "domain_breakdown": {
+                    d: len(urls) for d, urls in domains_map.items()
+                },
+                "created_jobs_sample": created_jobs[:10],  # Return first 10 for reference
+                "failed_urls_sample": failed_urls[:10] if failed_urls else None,
+                "message": f"✅ Imported {len(created_jobs)} URLs for crawling" + (
+                    f" (⚠️ {len(failed_urls)} failed)" if failed_urls else ""
+                ),
+            }
     
+    except HTTPException:
+        raise
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON format")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 encoded")
     except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Scheduling error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
 
 
-@router.post("/schedule-urls")
-async def schedule_crawl_urls(
-    domain: str = Query(...),
-    urls: List[str] = Body(..., description="List of URLs to crawl"),
-    priority: int = Query(5, ge=1, le=10),
-    include_js: bool = Query(False),
-    db: AsyncSession = Depends(get_db),
+@router.post("/manual-urls")
+async def crawl_manual_urls(
+    urls: List[str] = Form(..., description="List of URLs to crawl"),
+    max_depth: int = Query(3, ge=1, le=15, description="Max crawl depth"),
+    session_id: Optional[str] = Query(None, description="Add to existing session"),
 ):
     """
-    Schedule crawl with manually specified URLs.
+    Crawl manually entered URLs.
     
-    Useful for:
-    - Targeting specific pages
-    - Custom crawl patterns
-    - Re-crawling failed pages
+    Args:
+        urls: List of URLs (submitted as form data)
+        max_depth: Maximum crawl depth
+        session_id: Optional existing session ID
+    
+    Returns:
+        Job creation statistics
     """
     if not urls:
         raise HTTPException(status_code=400, detail="URLs list cannot be empty")
     
-    if len(urls) > 50000:
-        raise HTTPException(status_code=400, detail="Too many URLs (max 50,000)")
-    
     try:
-        session_id = str(uuid.uuid4())
+        from urllib.parse import urlparse
         
-        # Create crawl session
-        crawl_session = CrawlSession(
-            session_id=session_id,
-            domain=domain,
-            status="pending",
-            total_pages=len(urls),
-            created_at=datetime.utcnow(),
-        )
-        db.add(crawl_session)
-        
-        # Create individual jobs
-        job_ids = []
+        # Process URLs
+        processed_urls = []
         for url in urls:
-            job_id = str(uuid.uuid4())
-            crawl_job = CrawlJob(
-                job_id=job_id,
-                session_id=session_id,
-                domain=domain,
-                url=url,
-                status="pending",
-                priority=priority,
-                enable_js_rendering=include_js,
-                created_at=datetime.utcnow(),
-            )
-            db.add(crawl_job)
-            job_ids.append(job_id)
+            url = url.strip()
+            if not url:
+                continue
+            
+            if not url.startswith(('http://', 'https://')):
+                url = f"https://{url}"
+            
+            try:
+                parsed = urlparse(url)
+                if parsed.netloc:
+                    processed_urls.append({
+                        "url": url,
+                        "domain": parsed.netloc,
+                    })
+            except Exception:
+                pass
         
-        await db.commit()
+        if not processed_urls:
+            raise HTTPException(status_code=400, detail="No valid URLs provided")
         
-        return {
-            "status": "scheduled",
-            "session_id": session_id,
-            "domain": domain,
-            "urls_count": len(urls),
-            "priority": priority,
-            "js_rendering": include_js,
-        }
+        # Group by domain
+        domains_map: Dict[str, List[str]] = {}
+        for item in processed_urls:
+            d = item["domain"]
+            if d not in domains_map:
+                domains_map[d] = []
+            domains_map[d].append(item["url"])
+        
+        async with get_db_session() as db:
+            # Create or use session
+            if session_id:
+                stmt = select(CrawlSession).where(CrawlSession.session_id == session_id)
+                result = await db.execute(stmt)
+                session = result.scalar_one_or_none()
+                if not session:
+                    raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+            else:
+                first_domain = list(domains_map.keys())[0]
+                session = await crawler_service.create_crawl_session(
+                    domain=first_domain,
+                    max_depth=max_depth,
+                    page_limit=len(processed_urls),
+                )
+            
+            # Create jobs
+            created_jobs = []
+            
+            for domain_name, urls_list in domains_map.items():
+                for url in urls_list:
+                    try:
+                        job = await crawler_service.create_crawl_job(
+                            session_id=session.session_id,
+                            domain=domain_name,
+                            url=url,
+                            depth=0,
+                            max_depth=max_depth,
+                            enable_js_rendering=False,
+                        )
+                        if job:
+                            created_jobs.append({
+                                "job_id": job.job_id,
+                                "url": url,
+                                "domain": domain_name,
+                            })
+                    except Exception:
+                        pass
+            
+            return {
+                "status": "success",
+                "session_id": session.session_id,
+                "created_jobs": len(created_jobs),
+                "domains_count": len(domains_map),
+                "max_depth": max_depth,
+                "message": f"✅ Created {len(created_jobs)} crawl jobs",
+            }
     
+    except HTTPException:
+        raise
     except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error creating jobs: {str(e)}")
 
 
-@router.get("/jobs")
-async def list_crawl_jobs(
-    status: Optional[str] = Query(None, description="Filter by status"),
-    domain: Optional[str] = Query(None, description="Filter by domain"),
+@router.get("/sessions")
+async def list_crawl_sessions(
+    domain: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    db: AsyncSession = Depends(get_db),
 ):
     """
-    List all crawl jobs with filtering.
+    List crawl sessions with statistics.
     """
     try:
-        query = select(CrawlJob)
-        
-        if status:
-            query = query.where(CrawlJob.status == status)
-        
-        if domain:
-            query = query.where(CrawlJob.domain == domain)
-        
-        query = query.order_by(desc(CrawlJob.created_at))
-        query = query.limit(limit).offset(offset)
-        
-        result = await db.execute(query)
-        jobs = result.scalars().all()
-        
-        return {
-            "jobs": [
-                {
-                    "job_id": job.job_id,
-                    "domain": job.domain,
-                    "url": job.url,
-                    "status": job.status,
-                    "priority": job.priority,
-                    "page_value_score": float(job.page_value_score),
-                    "spam_score": float(job.spam_score),
-                    "relevance_score": float(job.relevance_score),
-                    "created_at": job.created_at.isoformat() if job.created_at else None,
-                    "started_at": job.started_at.isoformat() if job.started_at else None,
-                    "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-                }
-                for job in jobs
-            ],
-            "total": len(jobs),
-        }
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-
-@router.get("/jobs/{job_id}")
-async def get_crawl_job(
-    job_id: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Get detailed information about a specific crawl job.
-    """
-    try:
-        query = select(CrawlJob).where(CrawlJob.job_id == job_id)
-        result = await db.execute(query)
-        job = result.scalar_one_or_none()
-        
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
-        
-        return {
-            "job_id": job.job_id,
-            "session_id": job.session_id,
-            "domain": job.domain,
-            "url": job.url,
-            "status": job.status,
-            "priority": job.priority,
-            "depth": job.depth,
-            "max_depth": job.max_depth,
-            "title": job.title,
-            "description": job.description,
-            "word_count": job.word_count,
-            "headings_count": job.headings_count,
-            "internal_links_count": job.internal_links_count,
-            "external_links_count": job.external_links_count,
-            "scoring": {
-                "page_value_score": float(job.page_value_score),
-                "spam_score": float(job.spam_score),
-                "relevance_score": float(job.relevance_score),
-            },
-            "flags": {
-                "has_structured_data": job.has_structured_data,
-                "has_og_tags": job.has_og_tags,
-                "has_meta_description": job.has_meta_description,
-                "js_rendering": job.enable_js_rendering,
-            },
-            "timestamps": {
-                "created_at": job.created_at.isoformat() if job.created_at else None,
-                "started_at": job.started_at.isoformat() if job.started_at else None,
-                "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-            },
-        }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-
-@router.post("/jobs/{job_id}/cancel")
-async def cancel_crawl_job(
-    job_id: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Cancel a pending or running crawl job.
-    """
-    try:
-        query = select(CrawlJob).where(CrawlJob.job_id == job_id)
-        result = await db.execute(query)
-        job = result.scalar_one_or_none()
-        
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
-        
-        if job.status in ["completed", "failed", "cancelled"]:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Cannot cancel job with status '{job.status}'"
-            )
-        
-        job.status = "cancelled"
-        job.completed_at = datetime.utcnow()
-        
-        await db.commit()
-        
-        return {
-            "status": "cancelled",
-            "job_id": job_id,
-            "cancelled_at": datetime.utcnow().isoformat(),
-        }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-
-# ============================================================================
-# Batch Operations
-# ============================================================================
-
-@router.post("/batch/schedule")
-async def batch_schedule_crawls(
-    domains: List[str] = Body(..., description="List of domains to crawl"),
-    priority: int = Query(5, ge=1, le=10),
-    include_js: bool = Query(False),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Schedule multiple domains for crawling at once.
-    """
-    if not domains:
-        raise HTTPException(status_code=400, detail="Domains list cannot be empty")
-    
-    if len(domains) > 100:
-        raise HTTPException(status_code=400, detail="Too many domains (max 100)")
-    
-    try:
-        job_ids = []
-        errors = []
-        
-        for domain in domains:
-            try:
-                session_id = str(uuid.uuid4())
-                job_id = str(uuid.uuid4())
-                
-                crawl_session = CrawlSession(
-                    session_id=session_id,
-                    domain=domain,
-                    status="pending",
-                    created_at=datetime.utcnow(),
-                )
-                db.add(crawl_session)
-                
-                crawl_job = CrawlJob(
-                    job_id=job_id,
-                    session_id=session_id,
-                    domain=domain,
-                    status="pending",
-                    priority=priority,
-                    enable_js_rendering=include_js,
-                    created_at=datetime.utcnow(),
-                )
-                db.add(crawl_job)
-                job_ids.append({"domain": domain, "job_id": job_id, "session_id": session_id})
+        async with get_db_session() as db:
+            # Build query
+            query = select(CrawlSession)
             
-            except Exception as e:
-                errors.append({"domain": domain, "error": str(e)})
-        
-        await db.commit()
-        
-        return {
-            "status": "batch_scheduled",
-            "total_domains": len(domains),
-            "scheduled": len(job_ids),
-            "failed": len(errors),
-            "jobs": job_ids,
-            "errors": errors if errors else None,
-        }
-    
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-
-@router.post("/batch/cancel")
-async def batch_cancel_crawls(
-    job_ids: List[str] = Body(..., description="Job IDs to cancel"),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Cancel multiple crawl jobs at once.
-    """
-    if not job_ids:
-        raise HTTPException(status_code=400, detail="Job IDs list cannot be empty")
-    
-    try:
-        query = select(CrawlJob).where(
-            and_(
-                CrawlJob.job_id.in_(job_ids),
-                CrawlJob.status.in_(["pending", "running"])
-            )
-        )
-        
-        result = await db.execute(query)
-        jobs = result.scalars().all()
-        
-        cancelled_count = 0
-        for job in jobs:
-            job.status = "cancelled"
-            job.completed_at = datetime.utcnow()
-            cancelled_count += 1
-        
-        await db.commit()
-        
-        return {
-            "status": "batch_cancelled",
-            "requested": len(job_ids),
-            "cancelled": cancelled_count,
-        }
-    
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-
-# ============================================================================
-# Analytics & Reporting
-# ============================================================================
-
-@router.get("/stats")
-async def crawl_statistics(
-    hours: int = Query(24, ge=1, le=730, description="Last N hours"),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Get crawl statistics for the last N hours.
-    """
-    try:
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
-        
-        query = select(CrawlJob).where(CrawlJob.created_at >= cutoff_time)
-        result = await db.execute(query)
-        jobs = result.scalars().all()
-        
-        stats = {
-            "total_jobs": len(jobs),
-            "by_status": {},
-            "by_domain": {},
-            "total_pages_crawled": sum(job.crawled_pages for job in jobs),
-            "total_pages_failed": sum(job.failed_pages for job in jobs),
-            "average_pages_per_job": 0.0,
-            "average_page_value_score": 0.0,
-            "average_spam_score": 0.0,
-        }
-        
-        for job in jobs:
-            # Count by status
-            stats["by_status"][job.status] = stats["by_status"].get(job.status, 0) + 1
+            if domain:
+                query = query.where(CrawlSession.domain.ilike(f"%{domain}%"))
             
-            # Count by domain
-            stats["by_domain"][job.domain] = stats["by_domain"].get(job.domain, 0) + 1
-        
-        if jobs:
-            stats["average_pages_per_job"] = round(
-                stats["total_pages_crawled"] / len(jobs), 2
-            )
-            stats["average_page_value_score"] = round(
-                sum(job.page_value_score for job in jobs) / len(jobs), 2
-            )
-            stats["average_spam_score"] = round(
-                sum(job.spam_score for job in jobs) / len(jobs), 2
-            )
-        
-        return stats
+            # Get total
+            count_query = select(func.count(CrawlSession.session_id))
+            if domain:
+                count_query = count_query.where(CrawlSession.domain.ilike(f"%{domain}%"))
+            count_result = await db.execute(count_query)
+            total = count_result.scalar() or 0
+            
+            # Get paginated results
+            query = query.limit(limit).offset(offset)
+            result = await db.execute(query)
+            sessions = result.scalars().all()
+            
+            # Get job counts for each session
+            session_data = []
+            for session in sessions:
+                job_count_stmt = select(func.count(CrawlJob.job_id)).where(
+                    CrawlJob.session_id == session.session_id
+                )
+                job_count_result = await db.execute(job_count_stmt)
+                job_count = job_count_result.scalar() or 0
+                
+                session_data.append({
+                    "session_id": session.session_id,
+                    "domain": session.domain,
+                    "status": session.status,
+                    "total_jobs": job_count,
+                    "created_at": session.created_at.isoformat() if session.created_at else None,
+                    "started_at": session.started_at.isoformat() if session.started_at else None,
+                    "completed_at": session.completed_at.isoformat() if session.completed_at else None,
+                })
+            
+            return {
+                "meta": {
+                    "total": total,
+                    "count": len(session_data),
+                    "limit": limit,
+                    "offset": offset,
+                },
+                "sessions": session_data,
+            }
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
-@router.get("/stats/domain/{domain}")
-async def domain_crawl_stats(
-    domain: str,
-    db: AsyncSession = Depends(get_db),
-):
+@router.get("/sessions/{session_id}")
+async def get_session_details(session_id: str):
     """
-    Get detailed statistics for a specific domain.
+    Get detailed session information and job statistics.
     """
     try:
-        query = select(CrawlJob).where(CrawlJob.domain == domain)
-        result = await db.execute(query)
-        jobs = result.scalars().all()
+        stats = await crawler_service.crawl_worker.get_session_stats(session_id)
         
-        if not jobs:
-            raise HTTPException(status_code=404, detail="No crawl jobs found for domain")
-        
-        total_crawled = sum(job.crawled_pages for job in jobs)
-        total_failed = sum(job.failed_pages for job in jobs)
-        total_jobs = len(jobs)
-        
-        completed_jobs = [j for j in jobs if j.status == "completed"]
+        if not stats:
+            raise HTTPException(status_code=404, detail="Session not found")
         
         return {
-            "domain": domain,
-            "total_jobs": total_jobs,
-            "completed_jobs": len([j for j in jobs if j.status == "completed"]),
-            "failed_jobs": len([j for j in jobs if j.status == "failed"]),
-            "running_jobs": len([j for j in jobs if j.status == "running"]),
-            "pending_jobs": len([j for j in jobs if j.status == "pending"]),
-            "total_pages_crawled": total_crawled,
-            "total_pages_failed": total_failed,
-            "success_rate": round(
-                (total_crawled / (total_crawled + total_failed) * 100)
-                if (total_crawled + total_failed) > 0 else 0,
-                2
-            ),
-            "average_duration_seconds": round(
-                sum(
-                    (job.completed_at - job.started_at).total_seconds()
-                    for job in completed_jobs
-                    if job.completed_at and job.started_at
-                ) / len(completed_jobs)
-                if completed_jobs else 0,
-                2
-            ),
-            "last_crawl": max(
-                (job.completed_at or job.created_at for job in jobs),
-                default=None
-            ).isoformat() if jobs else None,
+            "status": "success",
+            "session": stats,
         }
     
     except HTTPException:
@@ -533,90 +405,4 @@ async def domain_crawl_stats(
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
-# ============================================================================
-# Configuration & Settings
-# ============================================================================
-
-@router.get("/config")
-async def get_crawl_config():
-    """
-    Get current crawl configuration and limits.
-    """
-    return {
-        "limits": {
-            "max_pages_per_job": 100000,
-            "max_urls_per_schedule": 50000,
-            "max_domains_per_batch": 100,
-            "max_job_ids_per_batch_cancel": 1000,
-        },
-        "priority_levels": {
-            "1": "Highest",
-            "5": "Medium (default)",
-            "10": "Lowest",
-        },
-        "supported_depths": list(range(1, 6)),
-        "features": {
-            "js_rendering": True,
-            "auto_sitemap_detection": True,
-            "custom_sitemap_support": True,
-            "batch_operations": True,
-            "statistics": True,
-            "postgresql_backed": True,
-        },
-    }
-
-
-@router.post("/config/update")
-async def update_crawl_config(
-    config: Dict[str, Any] = Body(...),
-):
-    """
-    Update crawl configuration (admin only).
-    
-    Note: This is a placeholder for future permission-based updates.
-    """
-    # TODO: Add permission checks
-    return {
-        "status": "success",
-        "message": "Configuration would be updated (not implemented)",
-        "config": config,
-    }
-
-
-# ============================================================================
-# Documentation
-# ============================================================================
-
-@router.get("/docs")
-async def crawl_api_documentation():
-    """
-    Get comprehensive crawl API documentation.
-    """
-    return {
-        "title": "Crawl Management API",
-        "version": "2.0",
-        "backend": "PostgreSQL + SQLAlchemy",
-        "sections": {
-            "scheduling": {
-                "POST /admin/crawl/schedule": "Schedule auto-detected sitemap crawl",
-                "POST /admin/crawl/schedule-urls": "Schedule custom URL list crawl",
-            },
-            "management": {
-                "GET /admin/crawl/jobs": "List all crawl jobs",
-                "GET /admin/crawl/jobs/{job_id}": "Get specific job details",
-                "POST /admin/crawl/jobs/{job_id}/cancel": "Cancel a job",
-            },
-            "batch_operations": {
-                "POST /admin/crawl/batch/schedule": "Schedule multiple domains",
-                "POST /admin/crawl/batch/cancel": "Cancel multiple jobs",
-            },
-            "analytics": {
-                "GET /admin/crawl/stats": "Get overall statistics",
-                "GET /admin/crawl/stats/domain/{domain}": "Get domain statistics",
-            },
-            "configuration": {
-                "GET /admin/crawl/config": "Get current configuration",
-                "POST /admin/crawl/config/update": "Update configuration",
-            },
-        },
-    }
+__all__ = ["router"]
