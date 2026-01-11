@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 import logging
 
-from app.db.database import get_db
+from app.core.database import get_db
 from app.services.crawler import crawler_service
 from app.db.models import CrawlSession, CrawlJob
 
