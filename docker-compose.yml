@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   # PostgreSQL Database
   # ⚠️ NOTE: Ports NOT exposed - only accessible within container network
