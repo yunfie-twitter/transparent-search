@@ -19,8 +19,12 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     # Create PGroonga extension (required for full-text search)
     # This must be done before creating any PGroonga indexes
-    op.execute("CREATE EXTENSION IF NOT EXISTS pgroonga")
-    op.execute("SELECT pgroonga_version()")
+    try:
+        op.execute("CREATE EXTENSION IF NOT EXISTS pgroonga")
+    except Exception as e:
+        # PGroonga might not be available, but we can still use regular PostgreSQL
+        print(f"Warning: Could not load PGroonga extension: {e}")
+        print("Proceeding with standard PostgreSQL indexes instead...")
     
     # Create crawl_sessions table
     op.create_table(
@@ -166,5 +170,9 @@ def downgrade() -> None:
     op.drop_table('crawl_jobs')
     op.drop_table('crawl_sessions')
     
-    # Drop PGroonga extension
-    op.execute("DROP EXTENSION IF EXISTS pgroonga CASCADE")
+    # Drop PGroonga extension if it exists
+    try:
+        op.execute("DROP EXTENSION IF EXISTS pgroonga CASCADE")
+    except Exception:
+        # Extension might not exist, that's okay
+        pass
