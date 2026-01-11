@@ -4,11 +4,12 @@ import hashlib
 from typing import Optional, List, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
-from ..database import get_db
-from ..utils.intent_detector import IntentDetector
-from ..utils.fuzzy_reranker import fuzzy_reranker
-from ..cache import get_redis_client
+from sqlalchemy import text, select, and_, or_
+from app.core.database import get_db
+from app.db.models import SearchContent, PageAnalysis
+from app.utils.intent_detector import IntentDetector
+from app.utils.fuzzy_reranker import fuzzy_reranker
+from app.core.cache import get_redis_client
 import time
 
 router = APIRouter()
@@ -33,10 +34,9 @@ async def fuzzy_search(
     Pipeline:
     1. Input Normalization (lowercase, trim)
     2. Intent Classification (what the user wants)
-    3. BM25 Full-text Search (ranked by relevance)
-    4. Vector Search (semantic similarity)
-    5. Fuzzy Reranking (handle typos and misspellings)
-    6. Ambiguity Control (penalize uncertain matches)
+    3. Full-text Search (ranked by relevance)
+    4. Fuzzy Reranking (handle typos and misspellings)
+    5. Ambiguity Control (penalize uncertain matches)
     """
     
     if not q or not q.strip():
@@ -44,6 +44,7 @@ async def fuzzy_search(
     
     start = time.time()
     q_lower = q.lower().strip()
+    q_pattern = f"%{q_lower}%"
     
     # Step 1: Cache check
     cache_key = _get_cache_key(
@@ -63,35 +64,30 @@ async def fuzzy_search(
             pass
     
     # Step 2: Intent Detection
-    intent_data = IntentDetector.detect_intent(q_lower)
-    primary_intent = intent_data['primary_intent']
-    intent_confidence = intent_data['intent_confidence']
+    try:
+        intent_data = IntentDetector.detect_intent(q_lower)
+        primary_intent = intent_data.get('primary_intent', 'informational')
+        intent_confidence = intent_data.get('intent_confidence', 0.5)
+    except Exception:
+        primary_intent = 'informational'
+        intent_confidence = 0.5
     
     try:
-        # Step 3: BM25 Full-text Search (PGroonga)
-        result = await db.execute(
-            text("""
-                SELECT 
-                    p.id, p.title, p.url, p.h1, p.content,
-                    p.og_title, p.og_description, p.og_image_url,
-                    s.domain, s.favicon_url, s.trust_score,
-                    cc.content_type, cc.type_confidence,
-                    p.tracker_risk_score,
-                    pgroonga_score(p.tableoid, p.ctid) AS pgroonga_relevance
-                FROM pages p
-                LEFT JOIN sites s ON p.site_id = s.id
-                LEFT JOIN content_classifications cc ON p.id = cc.page_id
-                WHERE (p.title &@~ :q OR p.h1 &@~ :q OR p.content &@~ :q)
-                ORDER BY pgroonga_score(p.tableoid, p.ctid) DESC
-                LIMIT :limit_val OFFSET :offset_val
-            """),
-            {
-                "q": q,
-                "limit_val": limit * 3,  # Get more results for reranking
-                "offset_val": offset,
-            }
-        )
-        rows = result.fetchall()
+        # Step 3: Full-text Search on SearchContent
+        # ✅ Use ILIKE for case-insensitive substring matching
+        query = select(SearchContent).where(
+            or_(
+                SearchContent.title.ilike(q_pattern),
+                SearchContent.h1.ilike(q_pattern),
+                SearchContent.description.ilike(q_pattern),
+                SearchContent.content.ilike(q_pattern),
+            )
+        ).order_by(
+            SearchContent.quality_score.desc()
+        ).limit(limit * 3).offset(offset)  # Get more results for reranking
+        
+        result = await db.execute(query)
+        rows = result.scalars().all()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database query error: {str(e)}")
     
@@ -115,32 +111,41 @@ async def fuzzy_search(
     base_scores = []
     
     for i, row in enumerate(rows):
+        # ✅ Extract title with priority: og_title > title > h1 > URL
+        title = row.og_title or row.title or row.h1 or row.url.split('/')[-1]
+        
         base_results.append({
             "id": row.id,
-            "title": row.title or "No title",
+            "title": title,
             "url": row.url,
             "domain": row.domain,
-            "favicon": row.favicon_url,
+            "favicon": None,  # Not in SearchContent
             "og_title": row.og_title,
             "og_description": row.og_description,
             "og_image": row.og_image_url,
             "content": row.content or "",
+            "h1": row.h1,
             "content_type": row.content_type or "unknown",
-            "content_confidence": float(row.type_confidence) if row.type_confidence else None,
-            "tracker_risk_score": float(row.tracker_risk_score) if row.tracker_risk_score else 1.0,
+            "content_confidence": None,  # Not in SearchContent
+            "tracker_risk_score": 0.0,  # Not in SearchContent
         })
         
-        # Base score from PGroonga (normalized)
-        score = float(row.pgroonga_relevance) if row.pgroonga_relevance else 1.0
+        # Base score from quality_score (0.0-1.0 range)
+        # Normalize to 0-10 for consistency with PGroonga
+        score = float(row.quality_score) * 10 if row.quality_score else 5.0
         base_scores.append(score)
     
     # Step 5: Fuzzy Reranking with Ambiguity Control
-    reranked = fuzzy_reranker.rerank(
-        base_results,
-        q_lower,
-        base_scores,
-        ambiguity_control=ambiguity
-    )
+    try:
+        reranked = fuzzy_reranker.rerank(
+            base_results,
+            q_lower,
+            base_scores,
+            ambiguity_control=ambiguity
+        )
+    except Exception as e:
+        # Fallback: use base results without fuzzy reranking
+        reranked = list(zip(base_results, base_scores))
     
     # Step 6: Apply limit and offset
     final_results = reranked[offset:offset + limit]
@@ -161,16 +166,18 @@ async def fuzzy_search(
             },
             "content_type": result["content_type"],
             "content_confidence": result["content_confidence"],
-            "tracker_risk_score": result["tracker_risk_score"],
-            "relevance_score": float(score),
+            "relevance_score": float(score) / 10.0,  # Normalize back to 0-1
         }
         
         if explain:
-            item["explain"] = {
-                "fuzzy_match": fuzzy_reranker.explain_relevance(result, q_lower),
-                "ambiguity_control": ambiguity,
-                "intent": primary_intent,
-            }
+            try:
+                item["explain"] = {
+                    "fuzzy_match": fuzzy_reranker.explain_relevance(result, q_lower),
+                    "ambiguity_control": ambiguity,
+                    "intent": primary_intent,
+                }
+            except Exception:
+                item["explain"] = {"error": "Could not explain relevance"}
         
         data.append(item)
     
@@ -221,13 +228,16 @@ async def explain_fuzzy_match(
         "content": "",
     }
     
-    explanation = fuzzy_reranker.explain_relevance(result, query.lower())
+    try:
+        explanation = fuzzy_reranker.explain_relevance(result, query.lower())
+    except Exception:
+        explanation = {"error": "Could not explain relevance"}
     
     return {
         "query": query,
         "result": result_title,
         "explanation": explanation,
-        "interpretation": _interpret_scores(explanation),
+        "interpretation": _interpret_scores(explanation) if "error" not in explanation else {},
     }
 
 
@@ -241,7 +251,7 @@ def _interpret_scores(scores: Dict[str, float]) -> Dict[str, str]:
         elif score >= 0.5:
             return "~ Fair match"
         elif score >= 0.3:
-            return "◐ Weak match"
+            return "◑ Weak match"
         else:
             return "✗ Poor match"
     
