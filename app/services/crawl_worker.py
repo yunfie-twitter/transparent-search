@@ -60,7 +60,8 @@ class CrawlWorker:
                 result = await db.execute(query)
                 jobs = result.scalars().all()
                 
-                logger.info(f"📋 Found {len(jobs)} pending jobs")
+                if jobs:
+                    logger.info(f"📋 Found {len(jobs)} pending jobs")
                 return list(jobs)
         
         except Exception as e:
@@ -151,7 +152,8 @@ class CrawlWorker:
                     if job:
                         child_jobs.append(job)
             
-            logger.info(f"🔗 Queued {len(child_jobs)} child jobs for depth {parent_depth + 1}")
+            if child_jobs:
+                logger.info(f"🔗 Queued {len(child_jobs)} child jobs for depth {parent_depth + 1}")
         
         except Exception as e:
             logger.error(f"❌ Error queuing child jobs: {e}")
@@ -203,59 +205,57 @@ class CrawlWorker:
     
     async def worker_loop(self):
         """Main worker loop - continuously process pending jobs."""
-        logger.info(f"🚀 Crawl worker started (max_concurrent={self.max_concurrent_jobs})")
+        logger.info(f"🚀 Crawl worker started (max_concurrent={self.max_concurrent_jobs}, poll_interval={self.poll_interval}s)")
         
-        while self.is_running:
-            try:
-                # Get number of available slots
-                available_slots = self.max_concurrent_jobs - len(self.active_jobs)
-                
-                if available_slots > 0:
-                    # Fetch pending jobs
-                    pending_jobs = await self.get_pending_jobs(limit=available_slots)
-                    
-                    if pending_jobs:
-                        logger.info(f"📥 Fetched {len(pending_jobs)} jobs to process")
-                        
-                        # Process jobs concurrently
-                        for job in pending_jobs:
-                            if len(self.active_jobs) < self.max_concurrent_jobs:
-                                task = asyncio.create_task(self.process_job(job))
-                                self.active_jobs[job.job_id] = task
-                    else:
-                        logger.debug("⏳ No pending jobs, waiting...")
-                
-                # Clean up completed tasks
-                completed = [job_id for job_id, task in self.active_jobs.items() if task.done()]
-                for job_id in completed:
-                    try:
-                        result = self.active_jobs[job_id].result()
-                        logger.info(f"✨ Job {job_id} result: {result}")
-                    except Exception as e:
-                        logger.error(f"❌ Job {job_id} failed: {e}")
-                    finally:
-                        del self.active_jobs[job_id]
-                
-                # Wait before next poll
-                await asyncio.sleep(self.poll_interval)
-            
-            except Exception as e:
-                logger.error(f"❌ Worker loop error: {e}")
-                await asyncio.sleep(self.poll_interval)
-    
-    async def start(self):
-        """Start the crawl worker."""
-        self.is_running = True
         try:
-            await self.worker_loop()
-        except KeyboardInterrupt:
-            logger.info("⏹️ Worker interrupted")
+            while self.is_running:
+                try:
+                    # Get number of available slots
+                    available_slots = self.max_concurrent_jobs - len(self.active_jobs)
+                    
+                    if available_slots > 0:
+                        # Fetch pending jobs
+                        pending_jobs = await self.get_pending_jobs(limit=available_slots)
+                        
+                        if pending_jobs:
+                            logger.info(f"📥 Processing {len(pending_jobs)} pending jobs (available slots: {available_slots})")
+                            
+                            # Process jobs concurrently
+                            for job in pending_jobs:
+                                if len(self.active_jobs) < self.max_concurrent_jobs:
+                                    task = asyncio.create_task(self.process_job(job))
+                                    self.active_jobs[job.job_id] = task
+                        else:
+                            if len(self.active_jobs) == 0:
+                                logger.debug("⏳ No pending jobs, idle...")
+                    
+                    # Clean up completed tasks
+                    completed = [job_id for job_id, task in self.active_jobs.items() if task.done()]
+                    for job_id in completed:
+                        try:
+                            result = self.active_jobs[job_id].result()
+                            logger.debug(f"✨ Job {job_id} completed")
+                        except Exception as e:
+                            logger.error(f"❌ Job {job_id} failed: {e}")
+                        finally:
+                            del self.active_jobs[job_id]
+                    
+                    # Wait before next poll
+                    await asyncio.sleep(self.poll_interval)
+                
+                except asyncio.CancelledError:
+                    logger.info("⏹️ Worker loop cancelled")
+                    raise
+                except Exception as e:
+                    logger.error(f"❌ Worker loop error: {e}")
+                    await asyncio.sleep(self.poll_interval)
+        
         finally:
-            await self.stop()
+            logger.info("🛑 Crawl worker stopped")
     
     async def stop(self):
         """Stop the crawl worker and wait for active jobs."""
-        logger.info("🛑 Stopping crawl worker...")
+        logger.info("🙋 Stopping crawl worker...")
         self.is_running = False
         
         # Wait for active jobs to complete
@@ -269,7 +269,7 @@ class CrawlWorker:
             except asyncio.TimeoutError:
                 logger.warning("⚠️ Some jobs did not complete in time")
         
-        logger.info("✅ Crawl worker stopped")
+        logger.info("✅ Crawl worker cleanup complete")
 
 
 # Global worker instance
