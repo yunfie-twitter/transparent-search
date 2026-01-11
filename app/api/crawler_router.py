@@ -12,7 +12,7 @@ from app.db.models import CrawlSession, CrawlJob
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
-    prefix="/crawl",
+    prefix="",
     tags=["crawl"],
     responses={404: {"description": "Not found"}},
 )
