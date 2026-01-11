@@ -123,32 +123,18 @@ async def search(
     if filter_quality is not None:
         filters.append(SearchContent.quality_score >= filter_quality)
     
-    # Build ranking score expression
-    # Simpler ranking without PGroonga dependencies
-    rank_score = (
-        # Title match: highest priority
-        (text(
-            f"CASE WHEN LOWER(title) LIKE '{q_pattern}' THEN 10 ELSE 0 END"
-        )) +
-        # H1 match
-        (text(
-            f"CASE WHEN LOWER(h1) LIKE '{q_pattern}' THEN 8 ELSE 0 END"
-        )) +
-        # URL contains query
-        (text(
-            f"CASE WHEN LOWER(url) LIKE '{q_pattern}' THEN 6 ELSE 0 END"
-        )) +
-        # Description/content match
-        (text(
-            f"CASE WHEN LOWER(description) LIKE '{q_pattern}' THEN 4 ELSE 0 END"
-        )) +
-        # Quality score bonus
-        (SearchContent.quality_score * 5) +
-        # Recency bonus
-        (text(
-            "GREATEST(0, 3 - EXTRACT(DAY FROM NOW() - last_crawled_at) * 0.01)"
-        ))
-    )
+    # Build ranking score expression as single SQL string
+    # Must concatenate strings before wrapping in text()
+    rank_score_sql = f"""
+        CASE WHEN LOWER(title) LIKE '{q_pattern}' THEN 10 ELSE 0 END +
+        CASE WHEN LOWER(h1) LIKE '{q_pattern}' THEN 8 ELSE 0 END +
+        CASE WHEN LOWER(url) LIKE '{q_pattern}' THEN 6 ELSE 0 END +
+        CASE WHEN LOWER(description) LIKE '{q_pattern}' THEN 4 ELSE 0 END +
+        (quality_score * 5) +
+        GREATEST(0, 3 - EXTRACT(DAY FROM NOW() - last_crawled_at) * 0.01)
+    """
+    
+    rank_score = text(rank_score_sql)
     
     try:
         # Query with ranking
