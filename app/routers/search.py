@@ -9,7 +9,7 @@ from app.utils.intent_detector import IntentDetector
 from app.core.cache import get_redis_client
 import time
 
-router = APIRouter()
+router = APIRouter(prefix="/search")
 
 def _get_cache_key(key_type: str, value: str) -> str:
     """Generate cache key with hash."""
@@ -290,7 +290,7 @@ async def search(
     return response
 
 
-@router.get("/search/debug/intent")
+@router.get("/debug/intent")
 async def debug_intent(q: str = Query(..., min_length=1, max_length=500)):
     """Debug endpoint to test intent detection."""
     intent_data = IntentDetector.detect_intent(q)
@@ -320,7 +320,7 @@ async def debug_intent(q: str = Query(..., min_length=1, max_length=500)):
     }
 
 
-@router.get("/search/debug/tracker-risk")
+@router.get("/debug/tracker-risk")
 async def debug_tracker_risk(db: AsyncSession = Depends(get_db)):
     """Debug endpoint to check tracker risk distribution."""
     try:
@@ -361,7 +361,7 @@ async def debug_tracker_risk(db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
 
 
-@router.get("/search/debug/content-types")
+@router.get("/debug/content-types")
 async def debug_content_types(db: AsyncSession = Depends(get_db)):
     """Debug endpoint to check content type distribution."""
     try:
@@ -396,7 +396,7 @@ async def debug_content_types(db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
 
 
-@router.post("/search/cache/invalidate")
+@router.post("/cache/invalidate")
 async def invalidate_cache(redis=Depends(get_redis_client)):
     """Invalidate all search cache."""
     if not redis:
