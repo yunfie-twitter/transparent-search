@@ -10,7 +10,7 @@ from sqlalchemy import select, func
 
 from app.core.database import init_db, close_db, get_db_session
 from app.core.cache import init_redis, close_redis
-from app.api import router
+from app.api.router import router  # ✅ Import router directly from app.api.router
 from app.services.crawl_worker import crawl_worker
 from app.db.models import CrawlJob
 
@@ -41,7 +41,8 @@ app.add_middleware(
 )
 
 # Include API router
-app.include_router(router.router, prefix="/api")
+# ✅ FIXED: router is already an APIRouter instance, no need for .router accessor
+app.include_router(router, prefix="/api")
 
 
 # ==================== DIAGNOSTICS ====================
