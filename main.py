@@ -51,49 +51,26 @@ async def check_pending_jobs() -> dict:
     """Check pending jobs in database."""
     try:
         async with get_db_session() as db:
-            # Count all jobs by status
+            # Count jobs by each status in a single efficient way
+            stats = {}
             for status in ["pending", "completed", "processing", "failed"]:
                 stmt = select(func.count(CrawlJob.job_id)).where(
                     CrawlJob.status == status
                 )
                 result = await db.execute(stmt)
-                counts = {status: result.scalar() or 0 for status in ["pending", "completed", "processing", "failed"]}
-            
-            stmt = select(func.count(CrawlJob.job_id)).where(
-                CrawlJob.status == "pending"
-            )
-            result = await db.execute(stmt)
-            pending_count = result.scalar() or 0
-            
-            stmt = select(func.count(CrawlJob.job_id)).where(
-                CrawlJob.status == "completed"
-            )
-            result = await db.execute(stmt)
-            completed_count = result.scalar() or 0
-            
-            stmt = select(func.count(CrawlJob.job_id)).where(
-                CrawlJob.status == "processing"
-            )
-            result = await db.execute(stmt)
-            processing_count = result.scalar() or 0
-            
-            stmt = select(func.count(CrawlJob.job_id)).where(
-                CrawlJob.status == "failed"
-            )
-            result = await db.execute(stmt)
-            failed_count = result.scalar() or 0
+                count = result.scalar() or 0
+                stats[status] = count
             
             return {
-                "pending": pending_count,
-                "completed": completed_count,
-                "processing": processing_count,
-                "failed": failed_count,
-                "total": pending_count + completed_count + processing_count + failed_count,
+                "pending": stats.get("pending", 0),
+                "completed": stats.get("completed", 0),
+                "processing": stats.get("processing", 0),
+                "failed": stats.get("failed", 0),
+                "total": sum(stats.values()),
             }
     except Exception as e:
         logger.error(f"❌ Failed to check pending jobs: {e}")
         return {
-            "error": str(e),
             "pending": 0,
             "completed": 0,
             "processing": 0,
