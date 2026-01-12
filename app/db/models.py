@@ -215,13 +215,59 @@ class SearchContent(Base):
     og_title = Column(String(500), nullable=True)
     og_description = Column(Text, nullable=True)
     og_image_url = Column(String(2048), nullable=True)
+    favicon_url = Column(String(2048), nullable=True)  # Site favicon
     
     # Timestamps
     indexed_at = Column(DateTime, default=datetime.utcnow, index=True)
     last_crawled_at = Column(DateTime, nullable=True)
     
+    # Relationships
+    images = relationship("PageImage", back_populates="page", cascade="all, delete-orphan")
+    
     __table_args__ = (
         Index("idx_domain_type", "domain", "content_type"),
         Index("idx_quality", "quality_score"),
         Index("idx_indexed_at", "indexed_at"),
+    )
+
+
+class PageImage(Base):
+    """Images found on indexed pages."""
+    __tablename__ = "page_images"
+    
+    image_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    page_id = Column(Integer, ForeignKey("search_content.id"), nullable=False, index=True)
+    url = Column(String(2048), nullable=False)
+    alt_text = Column(Text, nullable=True)  # ALT text for search
+    title = Column(String(500), nullable=True)
+    width = Column(Integer, nullable=True)
+    height = Column(Integer, nullable=True)
+    is_responsive = Column(Boolean, default=False)
+    position_index = Column(Integer, default=0)  # Position on page
+    discovered_at = Column(DateTime, default=datetime.utcnow, index=True)
+    
+    # Relationships
+    page = relationship("SearchContent", back_populates="images")
+    
+    __table_args__ = (
+        Index("idx_page_url", "page_id", "url"),
+        Index("idx_alt_text", "alt_text"),
+        Index("idx_discovered_at", "discovered_at"),
+    )
+
+
+class SiteFavicon(Base):
+    """Website favicons."""
+    __tablename__ = "site_favicons"
+    
+    favicon_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    domain = Column(String(255), nullable=False, unique=True, index=True)
+    url = Column(String(2048), nullable=False)
+    format = Column(String(50), nullable=True)  # ico, png, jpg, svg, etc.
+    size = Column(String(50), nullable=True)  # e.g., "32x32", "64x64"
+    discovered_at = Column(DateTime, default=datetime.utcnow)
+    last_verified_at = Column(DateTime, nullable=True)
+    
+    __table_args__ = (
+        Index("idx_domain", "domain"),
     )
