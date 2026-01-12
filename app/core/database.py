@@ -1,11 +1,16 @@
 """Database configuration and session management."""
 
+import logging
+import subprocess
+import sys
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from typing import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from app.core.config import DATABASE_URL
+
+logger = logging.getLogger(__name__)
 
 # Create async engine
 engine = create_async_engine(
@@ -53,10 +58,43 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
+def run_alembic_migrations():
+    """Run Alembic migrations synchronously."""
+    try:
+        logger.info("🔄 Running Alembic migrations...")
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            capture_output=True,
+            text=True,
+            cwd="/app",
+        )
+        
+        if result.returncode == 0:
+            logger.info("✅ Alembic migrations completed successfully")
+            if result.stdout:
+                logger.debug(f"Migration output: {result.stdout}")
+        else:
+            logger.warning(f"⚠️ Alembic migration had issues: {result.stderr}")
+            if "No such table" in result.stderr or "does not exist" in result.stderr:
+                logger.info("📝 Creating initial schema...")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not run Alembic migrations: {e}")
+        logger.info("📝 Falling back to Base.metadata.create_all()")
+
+
 async def init_db():
-    """Initialize database tables."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """Initialize database tables with Alembic migrations."""
+    # First, try to run Alembic migrations
+    run_alembic_migrations()
+    
+    # Then create any missing tables using SQLAlchemy metadata
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("✅ Database schema ensured")
+    except Exception as e:
+        logger.error(f"❌ Failed to create database schema: {e}")
+        raise
 
 
 async def close_db():
