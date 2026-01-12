@@ -4,10 +4,12 @@ FROM node:18-alpine AS builder
 WORKDIR /build
 
 # Copy package files
-COPY package.json package-lock.json ./
+COPY package.json ./
 
 # Install dependencies
-RUN npm ci
+# If package-lock.json exists, use it; otherwise use npm install
+COPY package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 # Copy source code
 COPY public ./public
@@ -22,8 +24,9 @@ FROM node:18-alpine
 WORKDIR /app
 
 # Install only production dependencies for Express server
-COPY package.json package-lock.json ./
-RUN npm ci --only=production
+COPY package.json ./
+COPY package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci --only=production; else npm install --production; fi
 
 # Copy built React app from builder
 COPY --from=builder /build/build ./build
