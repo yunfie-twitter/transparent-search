@@ -11,7 +11,8 @@ from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
-from app.db.models import CrawlJob, SearchContent, PageAnalysis
+from app.db.models import CrawlJob, SearchContent, PageAnalysis, PageImage, SiteFavicon
+from app.services.image_extractor import AssetExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -105,14 +106,14 @@ class ContentTypeEvaluator:
     
     # Type-specific minimum scores
     MIN_SCORES = {
-        "blog": 0.50,              # Blog articles: balanced requirements
-        "video": 0.45,             # Video: can't extract all metadata
-        "manga": 0.48,             # Manga: visual focus, less text
-        "image": 0.40,             # Image: minimal metadata available
-        "pdf": 0.52,               # PDF: structured but limited HTML
-        "official_site": 0.55,     # Official: high quality expected
-        "code_repository": 0.60,   # Code: highly technical, should be good
-        "social_media": 0.35,      # Social: low barrier to entry
+        "blog": 0.50,
+        "video": 0.45,
+        "manga": 0.48,
+        "image": 0.40,
+        "pdf": 0.52,
+        "official_site": 0.55,
+        "code_repository": 0.60,
+        "social_media": 0.35,
     }
     
     # Type-specific weights for quality factors
@@ -126,25 +127,25 @@ class ContentTypeEvaluator:
             "page_value_score": 0.08,
         },
         "video": {
-            "content_length": 0.15,          # Video description, not full content
-            "title_quality": 0.25,           # Title is crucial for video
-            "metadata_quality": 0.25,        # OG tags, transcripts
+            "content_length": 0.15,
+            "title_quality": 0.25,
+            "metadata_quality": 0.25,
             "url_quality": 0.15,
             "analysis_score": 0.12,
             "page_value_score": 0.08,
         },
         "manga": {
-            "content_length": 0.10,          # Visual content, not text
-            "title_quality": 0.25,           # Series name critical
-            "metadata_quality": 0.30,        # Chapter info, tags
+            "content_length": 0.10,
+            "title_quality": 0.25,
+            "metadata_quality": 0.30,
             "url_quality": 0.15,
             "analysis_score": 0.12,
             "page_value_score": 0.08,
         },
         "image": {
-            "content_length": 0.08,          # Minimal text
+            "content_length": 0.08,
             "title_quality": 0.20,
-            "metadata_quality": 0.35,        # Alt text, tags
+            "metadata_quality": 0.35,
             "url_quality": 0.15,
             "analysis_score": 0.12,
             "page_value_score": 0.10,
@@ -160,15 +161,15 @@ class ContentTypeEvaluator:
         "official_site": {
             "content_length": 0.20,
             "title_quality": 0.15,
-            "metadata_quality": 0.25,        # Highly structured
-            "url_quality": 0.20,             # Authority matters
+            "metadata_quality": 0.25,
+            "url_quality": 0.20,
             "analysis_score": 0.12,
             "page_value_score": 0.08,
         },
         "code_repository": {
-            "content_length": 0.30,          # Code complexity
+            "content_length": 0.30,
             "title_quality": 0.15,
-            "metadata_quality": 0.20,        # README, docs
+            "metadata_quality": 0.20,
             "url_quality": 0.15,
             "analysis_score": 0.12,
             "page_value_score": 0.08,
@@ -178,7 +179,7 @@ class ContentTypeEvaluator:
             "title_quality": 0.15,
             "metadata_quality": 0.15,
             "url_quality": 0.20,
-            "analysis_score": 0.20,          # Recent engagement important
+            "analysis_score": 0.20,
             "page_value_score": 0.10,
         },
     }
@@ -193,7 +194,7 @@ class ContentTypeEvaluator:
         """Get quality factor weights for content type."""
         return ContentTypeEvaluator.FACTOR_WEIGHTS.get(
             content_type,
-            ContentTypeEvaluator.FACTOR_WEIGHTS["blog"]  # Default to blog weights
+            ContentTypeEvaluator.FACTOR_WEIGHTS["blog"]
         )
     
     @staticmethod
@@ -201,15 +202,7 @@ class ContentTypeEvaluator:
         content_type: str,
         factors: Dict[str, float],
     ) -> float:
-        """Calculate weighted quality score for specific content type.
-        
-        Args:
-            content_type: Content type string
-            factors: Dictionary of quality factors (0-1 scale)
-        
-        Returns:
-            Weighted quality score (0-1 scale)
-        """
+        """Calculate weighted quality score for specific content type."""
         weights = ContentTypeEvaluator.get_weights(content_type)
         
         score = 0.0
@@ -233,19 +226,19 @@ class QualityScoreCalculator:
     
     # Content requirements (base)
     MIN_TITLE_LENGTH = 5
-    MIN_CONTENT_LENGTH = 50      # Relaxed for non-text content
+    MIN_CONTENT_LENGTH = 50
     MAX_TITLE_LENGTH = 200
     
     # Type-specific content requirements
     TYPE_CONTENT_REQUIREMENTS = {
-        "blog": 100,           # Blog articles should have decent content
-        "video": 30,           # Video descriptions can be short
-        "manga": 50,           # Manga metadata sufficient
-        "image": 20,           # Images just need basic metadata
-        "pdf": 100,            # PDFs should be substantial
-        "official_site": 80,   # Official pages should be complete
-        "code_repository": 120,# Code projects should be detailed
-        "social_media": 10,    # Social posts can be very short
+        "blog": 100,
+        "video": 30,
+        "manga": 50,
+        "image": 20,
+        "pdf": 100,
+        "official_site": 80,
+        "code_repository": 120,
+        "social_media": 10,
     }
     
     @staticmethod
@@ -257,19 +250,7 @@ class QualityScoreCalculator:
         analysis_score: Optional[float] = None,
         page_value_score: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Calculate comprehensive quality score with type-specific criteria.
-        
-        Args:
-            content_type: Detected content type
-            extractor: HTMLMetadataExtractor with extracted metadata
-            content: Full HTML content
-            url: Page URL
-            analysis_score: PageAnalysis score (0-100)
-            page_value_score: CrawlJob page value score (0-100)
-        
-        Returns:
-            Dictionary with quality metrics and indexing decision
-        """
+        """Calculate comprehensive quality score with type-specific criteria."""
         factors = {}
         reject_reasons = []
         
@@ -307,7 +288,7 @@ class QualityScoreCalculator:
                 factors['title_quality'] = 0.95
         
         # 3. Metadata completeness (type-specific)
-        metadata_score = 0.3  # Base score
+        metadata_score = 0.3
         
         # Common metadata
         if extractor.meta_description:
@@ -327,34 +308,29 @@ class QualityScoreCalculator:
                 metadata_score += 0.05
         
         elif content_type == "video":
-            # Video-specific: looks for transcript/description
             if len(extractor.meta_description or "") > 50:
                 metadata_score += 0.15
             if "video" in content.lower() or "transcript" in content.lower():
                 metadata_score += 0.05
         
         elif content_type == "manga":
-            # Manga: structured metadata important
-            if extractor.h1_tags:  # Series name
+            if extractor.h1_tags:
                 metadata_score += 0.10
-            if extractor.h2_tags:  # Chapter info
+            if extractor.h2_tags:
                 metadata_score += 0.10
         
         elif content_type == "image":
-            # Image: alt text and tags critical
             alt_text_count = len(re.findall(r'alt=["\']([^"\']*)["]', content))
             if alt_text_count > 0:
                 metadata_score += 0.15
         
         elif content_type == "official_site":
-            # Official: structured data bonus
             if extractor.og_title and extractor.og_description:
                 metadata_score += 0.15
             if "json-ld" in content.lower() or "schema" in content.lower():
                 metadata_score += 0.10
         
         elif content_type == "code_repository":
-            # Code: README and documentation indicators
             if "readme" in content.lower() or "documentation" in content.lower():
                 metadata_score += 0.20
             if "github" in url.lower() or "gitlab" in url.lower():
@@ -367,14 +343,14 @@ class QualityScoreCalculator:
             analysis_normalized = max(0, min(1.0, analysis_score / 100))
             factors['analysis_score'] = analysis_normalized
         else:
-            factors['analysis_score'] = 0.5  # Default neutral
+            factors['analysis_score'] = 0.5
         
         # 5. Page value score (if available)
         if page_value_score is not None:
             page_value_normalized = max(0, min(1.0, page_value_score / 100))
             factors['page_value_score'] = page_value_normalized
         else:
-            factors['page_value_score'] = 0.5  # Default neutral
+            factors['page_value_score'] = 0.5
         
         # 6. URL quality (spam detection)
         url_score = 1.0
@@ -485,17 +461,10 @@ class ContentIndexer:
     def __init__(self):
         self.classifier = ContentClassifier()
         self.quality_calculator = QualityScoreCalculator()
+        self.asset_extractor = AssetExtractor()
     
     def _extract_title(self, extractor: HTMLMetadataExtractor, url: str) -> str:
-        """Extract best available title from page metadata.
-        
-        Args:
-            extractor: HTMLMetadataExtractor with extracted metadata
-            url: URL for fallback title generation
-        
-        Returns:
-            Best available title or URL as fallback
-        """
+        """Extract best available title from page metadata."""
         if extractor.og_title:
             return extractor.og_title[:200]
         elif extractor.title:
@@ -509,6 +478,76 @@ class ContentIndexer:
                 return path_parts[-1].replace('-', ' ').replace('_', ' ')[:200]
             return parsed.netloc or url
     
+    async def _save_images(
+        self,
+        db: AsyncSession,
+        page_id: int,
+        images: List[Dict[str, Any]],
+    ) -> int:
+        """Save extracted images to database.
+        
+        Returns:
+            Count of saved images
+        """
+        saved_count = 0
+        
+        for image_data in images:
+            try:
+                page_image = PageImage(
+                    page_id=page_id,
+                    url=image_data["url"],
+                    alt_text=image_data["alt_text"] if image_data["alt_text"] else None,
+                    title=image_data["title"] if image_data["title"] else None,
+                    width=image_data["width"],
+                    height=image_data["height"],
+                    is_responsive=image_data["is_responsive"],
+                    position_index=image_data["position_index"],
+                )
+                db.add(page_image)
+                saved_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to save image: {image_data['url']} - {e}")
+        
+        if saved_count > 0:
+            logger.debug(f"Saved {saved_count} images for page {page_id}")
+        
+        return saved_count
+    
+    async def _save_favicon(
+        self,
+        db: AsyncSession,
+        domain: str,
+        favicon_data: Dict[str, str],
+    ) -> None:
+        """Save favicon to database."""
+        try:
+            # Check if favicon already exists for domain
+            existing = await db.execute(
+                select(SiteFavicon).where(SiteFavicon.domain == domain)
+            )
+            existing_favicon = existing.scalar_one_or_none()
+            
+            if existing_favicon:
+                # Update existing
+                existing_favicon.url = favicon_data["url"]
+                existing_favicon.format = favicon_data.get("format")
+                existing_favicon.size = favicon_data.get("size")
+                existing_favicon.last_verified_at = datetime.utcnow()
+            else:
+                # Create new
+                favicon = SiteFavicon(
+                    domain=domain,
+                    url=favicon_data["url"],
+                    format=favicon_data.get("format"),
+                    size=favicon_data.get("size"),
+                )
+                db.add(favicon)
+            
+            logger.debug(f"Saved favicon for {domain}: {favicon_data['url']}")
+        
+        except Exception as e:
+            logger.warning(f"Failed to save favicon for {domain}: {e}")
+    
     async def index_crawl_job(
         self,
         job_id: str,
@@ -516,19 +555,7 @@ class ContentIndexer:
         domain: str,
         url: str,
     ) -> Optional[SearchContent]:
-        """Index a completed crawl job into SearchContent.
-        
-        Uses content-type-specific quality criteria.
-        
-        Args:
-            job_id: CrawlJob ID
-            session_id: Session ID
-            domain: Domain being crawled
-            url: URL that was crawled
-        
-        Returns:
-            SearchContent record or None if indexing failed or filtered
-        """
+        """Index a completed crawl job into SearchContent with images and favicon."""
         job_key = job_id[:8]
         logger.info(f"🔍 [{job_key}] Processing: {url}")
         
@@ -600,6 +627,14 @@ class ContentIndexer:
                 title = self._extract_title(extractor, url)
                 logger.debug(f"[{job_key}] Title: {title}")
                 
+                # Extract images and favicon
+                images, images_with_alt = self.asset_extractor.extract_images(
+                    html_content, url
+                )
+                favicon = self.asset_extractor.extract_favicon(
+                    html_content, url
+                )
+                
                 # Create SearchContent
                 now = datetime.utcnow()
                 search_content = SearchContent(
@@ -616,9 +651,21 @@ class ContentIndexer:
                     og_title=extractor.og_title,
                     og_description=extractor.og_description,
                     og_image_url=extractor.og_image_url,
+                    favicon_url=favicon["url"] if favicon else None,
                     indexed_at=now,
                     last_crawled_at=job.completed_at or now,
                 )
+                
+                db.add(search_content)
+                await db.flush()  # Get the ID
+                
+                # Save images
+                if images:
+                    await self._save_images(db, search_content.id, images)
+                
+                # Save favicon
+                if favicon:
+                    await self._save_favicon(db, domain, favicon)
                 
                 job.metadata_json = {
                     "indexed_at": now.isoformat(),
@@ -632,15 +679,18 @@ class ContentIndexer:
                         "url_path"
                     ),
                     "analysis_id": analysis.analysis_id if analysis else None,
+                    "images_extracted": len(images),
+                    "images_with_alt": images_with_alt,
+                    "favicon_found": favicon is not None,
                 }
                 
-                db.add(search_content)
                 await db.commit()
                 await db.refresh(search_content)
                 
                 logger.info(
                     f"✅ [{job_key}] Indexed: {content_type} "
-                    f"(score={quality_score:.2f}, title='{title[:40]}...')"
+                    f"(score={quality_score:.2f}, images={len(images)}, "
+                    f"with_alt={images_with_alt}, favicon={'yes' if favicon else 'no'})"
                 )
                 return search_content
         
@@ -672,6 +722,7 @@ class ContentIndexer:
                 failed_count = 0
                 filtered_count = 0
                 type_stats = {}
+                total_images = 0
                 
                 for job in jobs:
                     if skip_existing:
@@ -695,6 +746,8 @@ class ContentIndexer:
                         indexed_count += 1
                         content_type = result.content_type
                         type_stats[content_type] = type_stats.get(content_type, 0) + 1
+                        if result.images:
+                            total_images += len(result.images)
                     else:
                         if job.metadata_json and job.metadata_json.get('rejected'):
                             filtered_count += 1
@@ -704,7 +757,8 @@ class ContentIndexer:
                 logger.info(
                     f"✨ Session {session_id}: "
                     f"indexed={indexed_count}, filtered={filtered_count}, "
-                    f"skipped={skipped_count}, failed={failed_count}"
+                    f"skipped={skipped_count}, failed={failed_count}, "
+                    f"images={total_images}"
                 )
                 logger.info(f"📊 By type: {type_stats}")
                 
@@ -715,6 +769,7 @@ class ContentIndexer:
                     "skipped": skipped_count,
                     "failed": failed_count,
                     "by_type": type_stats,
+                    "total_images": total_images,
                     "total_processed": indexed_count + filtered_count + skipped_count + failed_count,
                 }
         
@@ -753,6 +808,7 @@ class ContentIndexer:
                 failed_count = 0
                 filtered_count = 0
                 type_stats = {}
+                total_images = 0
                 
                 for job in jobs:
                     if skip_existing:
@@ -776,6 +832,8 @@ class ContentIndexer:
                         indexed_count += 1
                         content_type = result.content_type
                         type_stats[content_type] = type_stats.get(content_type, 0) + 1
+                        if result.images:
+                            total_images += len(result.images)
                     else:
                         if job.metadata_json and job.metadata_json.get('rejected'):
                             filtered_count += 1
@@ -785,7 +843,8 @@ class ContentIndexer:
                 logger.info(
                     f"✨ Domain {domain}: "
                     f"indexed={indexed_count}, filtered={filtered_count}, "
-                    f"skipped={skipped_count}, failed={failed_count}"
+                    f"skipped={skipped_count}, failed={failed_count}, "
+                    f"images={total_images}"
                 )
                 logger.info(f"📊 By type: {type_stats}")
                 
@@ -796,6 +855,7 @@ class ContentIndexer:
                     "skipped": skipped_count,
                     "failed": failed_count,
                     "by_type": type_stats,
+                    "total_images": total_images,
                     "total_processed": indexed_count + filtered_count + skipped_count + failed_count,
                 }
         
