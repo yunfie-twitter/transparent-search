@@ -35,9 +35,10 @@ END $$;
 GRANT CONNECT ON DATABASE postgres TO search_user;
 GRANT ALL PRIVILEGES ON DATABASE transparent_search TO search_user;
 
--- Connect to transparent_search and set up schema
-\c transparent_search search_user
-
--- Create extensions if needed
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+-- Set up schema on transparent_search database
+DO $$
+BEGIN
+  -- These will be executed in the context of postgres database
+  -- The actual schema creation will happen when the app connects
+  NULL; -- Placeholder for future schema setup
+END $$;
