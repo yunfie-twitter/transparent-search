@@ -16,6 +16,7 @@ from app.db.models import (
 from app.core.database import get_db_session
 from app.services.crawler import crawler_service
 from app.utils.sitemap_manager import sitemap_manager
+from app.services.indexer import content_indexer
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,9 @@ class CrawlScheduler:
     # Scheduling configuration
     MIN_CRAWL_INTERVAL_HOURS = 4
     MAX_CRAWL_INTERVAL_HOURS = 24
+    
+    # Quality filtering configuration
+    MIN_QUALITY_SCORE = 0.45  # Minimum quality score to be indexed
     
     # Global control flags
     _crawl_enabled = True
@@ -92,6 +96,7 @@ class CrawlScheduler:
             "force_pause_index": cls._force_pause_index,
             "min_interval_hours": cls.MIN_CRAWL_INTERVAL_HOURS,
             "max_interval_hours": cls.MAX_CRAWL_INTERVAL_HOURS,
+            "min_quality_score": cls.MIN_QUALITY_SCORE,
         }
     
     @staticmethod
@@ -299,33 +304,73 @@ class CrawlScheduler:
     
     @staticmethod
     async def _trigger_indexing() -> None:
-        """Trigger indexing of newly crawled content."""
+        """Trigger indexing of newly crawled content with quality filtering."""
         try:
             async with get_db_session() as db:
-                # Find unindexed crawl jobs
+                # Find unindexed crawl jobs (those that have been crawled but not indexed)
                 unindexed_query = select(CrawlJob).where(
                     and_(
                         CrawlJob.status == "completed",
-                        CrawlJob.indexed == False,  # noqa: E712
+                        # Check if NOT already in SearchContent
+                        ~CrawlJob.job_id.in_(
+                            select(SearchContent.job_id).distinct()
+                        ),
                     )
-                ).limit(50)
+                ).limit(50)  # Process in batches of 50
                 
                 result = await db.execute(unindexed_query)
                 unindexed_jobs = result.scalars().all()
+                
+                if not unindexed_jobs:
+                    logger.debug("No unindexed jobs to process")
+                    return
+                
+                logger.info(f"📇 Processing {len(unindexed_jobs)} unindexed crawl jobs for indexing...")
+                
+                indexed_count = 0
+                filtered_count = 0
+                failed_count = 0
                 
                 for job in unindexed_jobs:
                     if CrawlScheduler._force_pause_index:
                         break
                     
                     try:
-                        # Index the crawled content
-                        await crawler_service.index_crawl_result(job)
-                        logger.info(f"Indexed crawl result: {job.job_id}")
+                        # Index the crawled content using the new indexer
+                        result = await content_indexer.index_crawl_job(
+                            job_id=job.job_id,
+                            session_id=job.session_id,
+                            domain=job.domain,
+                            url=job.url,
+                        )
+                        
+                        if result:
+                            indexed_count += 1
+                            logger.debug(f"✅ Indexed: {job.url}")
+                        else:
+                            # Check if filtered out due to quality score
+                            if job.metadata_json and job.metadata_json.get('rejected'):
+                                filtered_count += 1
+                                reject_reason = job.metadata_json.get('reject_reason', 'unknown')
+                                logger.warning(
+                                    f"⛔ Filtered: {job.url} "
+                                    f"(reason={reject_reason})"
+                                )
+                            else:
+                                failed_count += 1
+                                logger.warning(f"⚠️  Failed to index: {job.url}")
+                    
                     except Exception as e:
-                        logger.warning(f"Failed to index job {job.job_id}: {e}")
+                        failed_count += 1
+                        logger.warning(f"❌ Indexing error for {job.job_id}: {e}")
+                
+                logger.info(
+                    f"🎯 Indexing complete: "
+                    f"indexed={indexed_count}, filtered={filtered_count}, failed={failed_count}"
+                )
         
         except Exception as e:
-            logger.error(f"Indexing trigger error: {e}")
+            logger.error(f"Indexing trigger error: {e}", exc_info=True)
 
 
 crawl_scheduler = CrawlScheduler()
