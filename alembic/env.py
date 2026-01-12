@@ -29,7 +29,11 @@ DATABASE_URL = os.getenv(
 
 # Convert asyncpg URL to sync URL for Alembic
 if "asyncpg" in DATABASE_URL:
-    DATABASE_URL = DATABASE_URL.replace("postgresql+asyncpg", "postgresql")
+    # Use psycopg3 (psycopg) instead of psycopg2
+    DATABASE_URL = DATABASE_URL.replace("postgresql+asyncpg", "postgresql+psycopg")
+elif "postgresql://" in DATABASE_URL:
+    # Ensure we use psycopg3
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://")
 
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
@@ -66,19 +70,24 @@ def run_migrations_online() -> None:
     configuration = config.get_section(config.config_ini_section)
     configuration["sqlalchemy.url"] = DATABASE_URL
     
-    connectable = engine_from_config(
-        configuration,
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-
-    with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
+    try:
+        connectable = engine_from_config(
+            configuration,
+            prefix="sqlalchemy.",
+            poolclass=pool.NullPool,
         )
 
-        with context.begin_transaction():
-            context.run_migrations()
+        with connectable.connect() as connection:
+            context.configure(
+                connection=connection, target_metadata=target_metadata
+            )
+
+            with context.begin_transaction():
+                context.run_migrations()
+    except Exception as e:
+        print(f"Warning: Could not run Alembic migrations: {e}")
+        print(f"Using DATABASE_URL: {DATABASE_URL}")
+        raise
 
 
 if context.is_offline_mode():
