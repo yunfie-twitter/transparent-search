@@ -16,21 +16,12 @@ logger = logging.getLogger(__name__)
 
 
 class ContentClassifier:
-    """Content type classifier with enhanced detection."""
-    
-    # Content types that should be indexed
-    INDEXABLE_TYPES = {'text_article'}  # Only blog/text articles
-    
-    # Content types to explicitly reject
-    REJECTED_TYPES = {
-        'video', 'image', 'pdf',
-        'code_repository', 'social_media',
-        'manga', 'official_site', 'streaming',
-    }
+    """Content type classifier - detects content type without discrimination."""
     
     @staticmethod
     def classify_by_url(url: str) -> str:
         """Classify content type based on URL pattern.
+        Neutral classification - all types are evaluated equally by quality score.
         
         Args:
             url: URL to classify
@@ -40,20 +31,7 @@ class ContentClassifier:
         """
         url_lower = url.lower()
         
-        # Official site indicators (very strict)
-        official_patterns = [
-            'www.',
-            '/official',
-            '/about',
-            '/company',
-            '/products',
-            '/service',
-            '/contact',
-        ]
-        if any(p in url_lower for p in official_patterns):
-            return "official_site"
-        
-        # Streaming/Video sites
+        # Video/Streaming sites
         if any(x in url_lower for x in [
             "youtube.com", "youtu.be",
             "vimeo.com", "dailymotion.com",
@@ -62,7 +40,7 @@ class ContentClassifier:
             "/video", "/videos", "/stream",
             ".mp4", ".webm", ".mov",
         ]):
-            return "streaming"
+            return "video"
         
         # Manga/Comic sites
         if any(x in url_lower for x in [
@@ -97,15 +75,27 @@ class ContentClassifier:
         ]):
             return "social_media"
         
-        # Default to text article (blog posts, news, etc.)
-        return "text_article"
+        # Official sites (but don't reject - just classify)
+        if any(p in url_lower for p in [
+            'www.',
+            '/official',
+            '/about',
+            '/company',
+            '/products',
+            '/service',
+            '/contact',
+        ]):
+            return "official_site"
+        
+        # Default to blog/article
+        return "blog"
 
 
 class QualityScoreCalculator:
-    """Enhanced quality score calculation with content type filtering."""
+    """Enhanced quality score calculation - evaluates all content types equally."""
     
     # Quality score thresholds
-    MIN_QUALITY_SCORE = 0.45  # Minimum score to be indexed
+    MIN_QUALITY_SCORE = 0.45  # Minimum score to be indexed (applies to ALL types)
     EXCELLENT_SCORE = 0.8
     GOOD_SCORE = 0.6
     
@@ -125,8 +115,11 @@ class QualityScoreCalculator:
     ) -> Dict[str, Any]:
         """Calculate comprehensive quality score.
         
+        All content types (blog, manga, video, official_site, etc.) are evaluated
+        using the same criteria. No discrimination based on content type.
+        
         Args:
-            content_type: Detected content type (from ContentClassifier)
+            content_type: Detected content type (informational only)
             extractor: HTMLMetadataExtractor with extracted metadata
             content: Full HTML content
             url: Page URL
@@ -140,18 +133,6 @@ class QualityScoreCalculator:
             - reject_reason: Why page was rejected (if any)
             - should_index: Whether to index this content
         """
-        # ❌ REJECT non-text-article types immediately
-        if content_type != 'text_article':
-            reject_reason = f"unsupported_content_type({content_type})"
-            logger.debug(f"Content type filter: {url} → {reject_reason}")
-            return {
-                'score': 0.0,
-                'factors': {'content_type_filter': 0.0},
-                'reject_reason': reject_reason,
-                'should_index': False,
-                'content_type': content_type,
-            }
-        
         factors = {}
         reject_reasons = []
         
@@ -219,7 +200,7 @@ class QualityScoreCalculator:
         factors['url_quality'] = max(0.3, url_score)
         
         # Calculate weighted final score
-        # Weight higher factors more
+        # All content types use same weights - no discrimination
         weights = {
             'content_length': 0.25,
             'title_quality': 0.20,
@@ -351,6 +332,8 @@ class ContentIndexer:
     ) -> Optional[SearchContent]:
         """Index a completed crawl job into SearchContent.
         
+        All content types are evaluated equally by quality score.
+        
         Args:
             job_id: CrawlJob ID
             session_id: Session ID
@@ -397,11 +380,11 @@ class ContentIndexer:
                 analysis_result = await db.execute(analysis_stmt)
                 analysis = analysis_result.scalar_one_or_none()
                 
-                # Classify content type first
+                # Classify content type (informational only)
                 content_type = self.classifier.classify_by_url(url)
-                logger.debug(f"[{job_key}] Classified as: {content_type}")
+                logger.debug(f"[{job_key}] Content type: {content_type}")
                 
-                # Calculate quality score with content type filtering
+                # Calculate quality score (same criteria for all types)
                 quality_result = self.quality_calculator.calculate(
                     content_type=content_type,
                     extractor=extractor,
@@ -414,7 +397,7 @@ class ContentIndexer:
                 quality_score = quality_result['score']
                 reject_reason = quality_result['reject_reason']
                 
-                # ❌ Enforce quality filtering and content type filtering
+                # Enforce quality filtering (applies equally to all content types)
                 if not quality_result['should_index']:
                     logger.warning(
                         f"⛔ [{job_key}] FILTERED OUT: {url} "
@@ -432,7 +415,7 @@ class ContentIndexer:
                     await db.commit()
                     return None
                 
-                # ✅ Extract title using priority chain
+                # Extract title using priority chain
                 title = self._extract_title(extractor, url)
                 logger.debug(f"[{job_key}] Extracted title: {title}")
                 
@@ -441,9 +424,9 @@ class ContentIndexer:
                 search_content = SearchContent(
                     url=url,
                     domain=domain,
-                    title=title,  # ✅ Use extracted title
-                    description=extractor.meta_description or "",  # Use meta description
-                    content=html_content[:10000] if html_content else "",  # Store first 10K chars
+                    title=title,
+                    description=extractor.meta_description or "",
+                    content=html_content[:10000] if html_content else "",
                     content_type=content_type,
                     quality_score=quality_score,
                     h1=extractor.h1_tags[0] if extractor.h1_tags else None,
