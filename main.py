@@ -2,10 +2,12 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func
 
 from app.core.database import init_db, get_db_session
@@ -210,17 +212,28 @@ app.add_middleware(
 # Include API router
 app.include_router(router, prefix="/api")
 
+# Mount static files
+static_dir = Path(__file__).parent / "app" / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    logger.info(f"✅ Static files mounted at {static_dir}")
+else:
+    logger.warning(f"⚠️ Static directory not found: {static_dir}")
+
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
+    """Root endpoint - serves static index.html if available, otherwise returns status JSON."""
+    # If static files are mounted, FastAPI will serve index.html automatically
+    # This endpoint is a fallback JSON response
     redis_client = await get_redis_client()
     return {
         "status": "ok",
         "name": "Transparent Search API",
         "version": "1.0.0",
-        "docs": "/docs",
+        "docs": "/api/docs",
         "redis": "connected" if redis_client else "disconnected",
+        "ui": "/static/index.html",
     }
 
 
