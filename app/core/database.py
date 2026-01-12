@@ -1,8 +1,6 @@
 """Database configuration and session management."""
 
 import logging
-import subprocess
-import sys
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from typing import AsyncGenerator
@@ -58,40 +56,14 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
-def run_alembic_migrations():
-    """Run Alembic migrations synchronously."""
-    try:
-        logger.info("🔄 Running Alembic migrations...")
-        result = subprocess.run(
-            ["alembic", "upgrade", "head"],
-            capture_output=True,
-            text=True,
-            cwd="/app",
-        )
-        
-        if result.returncode == 0:
-            logger.info("✅ Alembic migrations completed successfully")
-            if result.stdout:
-                logger.debug(f"Migration output: {result.stdout}")
-        else:
-            logger.warning(f"⚠️ Alembic migration had issues: {result.stderr}")
-            if "No such table" in result.stderr or "does not exist" in result.stderr:
-                logger.info("📝 Creating initial schema...")
-    except FileNotFoundError:
-        logger.warning("⚠️ Alembic command not found")
-        logger.info("📝 Falling back to Base.metadata.create_all()")
-    except Exception as e:
-        logger.warning(f"⚠️ Could not run Alembic migrations: {e}")
-        logger.info("📝 Falling back to Base.metadata.create_all()")
-
-
 async def init_db():
-    """Initialize database tables with Alembic migrations."""
-    # First, try to run Alembic migrations
-    run_alembic_migrations()
+    """Initialize database tables using SQLAlchemy metadata.
     
-    # Then create any missing tables using SQLAlchemy metadata
+    This creates all tables defined in the ORM models if they don't exist.
+    For complex migrations, use Alembic separately via CLI.
+    """
     try:
+        logger.info("💾 Creating database tables from ORM models...")
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("✅ Database schema ensured")
