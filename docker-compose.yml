@@ -6,12 +6,13 @@ services:
     image: postgres:16-alpine
     container_name: transparent-search-postgres
     environment:
-      POSTGRES_DB: transparent_search
-      POSTGRES_USER: search_user
-      POSTGRES_PASSWORD: search_password
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_INITDB_ARGS: "-c password_encryption=scram-sha-256"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./init-db.sql:/docker-entrypoint-initdb.d/01-init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
