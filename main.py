@@ -1,6 +1,7 @@
 """FastAPI application with Redis caching, database, and crawl worker integration."""
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -26,6 +27,24 @@ logger = logging.getLogger(__name__)
 
 # Global reference to worker task
 worker_task: Optional[asyncio.Task] = None
+
+# Get the absolute path to the project root
+PROJECT_ROOT = Path(__file__).resolve().parent
+logger.info(f"📁 Project root: {PROJECT_ROOT}")
+
+# Static files directory
+STATIC_DIR = PROJECT_ROOT / "app" / "static"
+INDEX_HTML = STATIC_DIR / "index.html"
+logger.info(f"📁 Static directory: {STATIC_DIR}")
+logger.info(f"📄 Index HTML path: {INDEX_HTML}")
+logger.info(f"📄 Index HTML exists: {INDEX_HTML.exists()}")
+
+if INDEX_HTML.exists():
+    logger.info(f"✅ Found index.html at {INDEX_HTML}")
+else:
+    logger.warning(f"⚠️ index.html NOT found at {INDEX_HTML}")
+    logger.warning(f"   Current working directory: {os.getcwd()}")
+    logger.warning(f"   Script location: {__file__}")
 
 
 async def check_pending_jobs() -> dict:
@@ -214,28 +233,35 @@ app.add_middleware(
 app.include_router(router, prefix="/api")
 
 # ==================== STATIC FILES CONFIGURATION ====================
-# Determine static directory path
-static_dir = Path(__file__).parent / "app" / "static"
-index_html_path = static_dir / "index.html"
-
-if static_dir.exists():
+if STATIC_DIR.exists():
     # Mount /static directory for CSS, JS, images, etc.
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-    logger.info(f"✅ Static files mounted at {static_dir}")
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    logger.info(f"✅ Static files mounted at {STATIC_DIR}")
 else:
-    logger.warning(f"⚠️ Static directory not found: {static_dir}")
+    logger.warning(f"⚠️ Static directory not found: {STATIC_DIR}")
 
 
 # ==================== ROOT ENDPOINT ====================
 @app.get("/")
 async def root():
     """Root endpoint - serves index.html from static directory."""
-    if index_html_path.exists():
-        logger.debug(f"📄 Serving index.html from {index_html_path}")
-        return FileResponse(str(index_html_path), media_type="text/html")
+    logger.debug(f"Root endpoint called - checking for index.html at {INDEX_HTML}")
+    
+    if INDEX_HTML.exists():
+        logger.info(f"✅ Serving index.html from {INDEX_HTML}")
+        return FileResponse(
+            str(INDEX_HTML),
+            media_type="text/html",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+        )
     else:
         # Fallback JSON response if index.html not found
-        logger.warning("⚠️ index.html not found, returning status JSON")
+        logger.warning(f"⚠️ index.html not found at {INDEX_HTML}")
+        logger.warning(f"   Static dir exists: {STATIC_DIR.exists()}")
+        logger.warning(f"   Static dir contents: {list(STATIC_DIR.glob('*')) if STATIC_DIR.exists() else 'N/A'}")
+        logger.warning(f"   Current working directory: {os.getcwd()}")
+        logger.warning(f"   __file__: {__file__}")
+        
         redis_client = await get_redis_client()
         return {
             "status": "ok",
@@ -244,6 +270,14 @@ async def root():
             "docs": "/api/docs",
             "redis": "connected" if redis_client else "disconnected",
             "ui": "/static/index.html",
+            "debug": {
+                "index_html_path": str(INDEX_HTML),
+                "index_html_exists": INDEX_HTML.exists(),
+                "static_dir": str(STATIC_DIR),
+                "static_dir_exists": STATIC_DIR.exists(),
+                "cwd": os.getcwd(),
+                "script": __file__,
+            }
         }
 
 
