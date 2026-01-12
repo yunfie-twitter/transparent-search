@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transparent Search - 検索エンジン</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 600px;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .logo {
+            font-size: 32px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .search-box {
+            position: relative;
+            margin-bottom: 30px;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 14px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .search-button {
+            position: absolute;
+            right: 4px;
+            top: 50%;
+            transform: translateY(-50%);
+            padding: 10px 16px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .search-button:hover {
+            transform: translateY(-50%) scale(1.02);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .search-button:active {
+            transform: translateY(-50%) scale(0.98);
+        }
+
+        .results {
+            margin-top: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .result-item {
+            padding: 16px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .result-item:hover {
+            background: #f5f5f5;
+            border-color: #667eea;
+            transform: translateX(4px);
+        }
+
+        .result-title {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+        }
+
+        .result-url {
+            font-size: 12px;
+            color: #667eea;
+            margin-bottom: 6px;
+        }
+
+        .result-preview {
+            font-size: 13px;
+            color: #666;
+            line-height: 1.5;
+        }
+
+        .status {
+            text-align: center;
+            color: #999;
+            font-size: 13px;
+            margin-top: 20px;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .spinner {
+            border: 3px solid #e0e0e0;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            padding: 12px;
+            background: #fee;
+            border: 1px solid #fcc;
+            border-radius: 6px;
+            color: #c33;
+            font-size: 13px;
+            margin-top: 12px;
+        }
+
+        .info-box {
+            background: #f5f5f5;
+            border-left: 4px solid #667eea;
+            padding: 16px;
+            margin-top: 30px;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #666;
+        }
+
+        .api-link {
+            color: #667eea;
+            text-decoration: none;
+            margin-top: 15px;
+            display: block;
+        }
+
+        .api-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">🔍 Transparent Search</div>
+            <div class="subtitle">Zero-ETL Search Engine with PostgreSQL & PGroonga</div>
+        </div>
+
+        <div class="search-box">
+            <input
+                type="text"
+                class="search-input"
+                id="searchInput"
+                placeholder="検索キーワードを入力..."
+                autocomplete="off"
+            >
+            <button class="search-button" id="searchButton">検索</button>
+        </div>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <div>検索中...</div>
+        </div>
+
+        <div class="results" id="results"></div>
+
+        <div class="status" id="status"></div>
+
+        <div class="info-box">
+            <strong>ℹ️ API ドキュメント</strong><br>
+            詳細は以下のエンドポイントをご覧ください：
+            <a href="/api/docs" class="api-link" target="_blank">📚 API Docs (Swagger UI)</a>
+            <a href="/api/redoc" class="api-link" target="_blank">📖 ReDoc</a>
+            <a href="/health" class="api-link" target="_blank">💚 Health Check</a>
+        </div>
+    </div>
+
+    <script>
+        const searchInput = document.getElementById('searchInput');
+        const searchButton = document.getElementById('searchButton');
+        const resultsDiv = document.getElementById('results');
+        const loadingDiv = document.getElementById('loading');
+        const statusDiv = document.getElementById('status');
+
+        // 検索ボタンのクリックイベント
+        searchButton.addEventListener('click', performSearch);
+
+        // Enterキーで検索
+        searchInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                performSearch();
+            }
+        });
+
+        async function performSearch() {
+            const query = searchInput.value.trim();
+
+            if (!query) {
+                statusDiv.textContent = '検索キーワードを入力してください';
+                return;
+            }
+
+            loadingDiv.style.display = 'block';
+            resultsDiv.innerHTML = '';
+            statusDiv.textContent = '';
+
+            try {
+                // API エンドポイント（実装は別途）
+                const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP Error: ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                if (data.results && data.results.length > 0) {
+                    displayResults(data.results);
+                    statusDiv.textContent = `${data.results.length} 件の検索結果`;
+                } else {
+                    resultsDiv.innerHTML = '<div class="error">検索結果が見つかりませんでした</div>';
+                    statusDiv.textContent = '0 件の検索結果';
+                }
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">⚠️ エラー: ${error.message}</div>`;
+                statusDiv.textContent = 'エラーが発生しました';
+            } finally {
+                loadingDiv.style.display = 'none';
+            }
+        }
+
+        function displayResults(results) {
+            resultsDiv.innerHTML = results.map((item) => `
+                <div class="result-item" onclick="window.open('${escapeHtml(item.url)}', '_blank')">
+                    <div class="result-title">${escapeHtml(item.title || 'タイトルなし')}</div>
+                    <div class="result-url">${escapeHtml(item.url || '')}</div>
+                    <div class="result-preview">${escapeHtml((item.preview || item.description || '').substring(0, 150))}</div>
+                </div>
+            `).join('');
+        }
+
+        function escapeHtml(text) {
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text.replace(/[&<>"']/g, (m) => map[m]);
+        }
+
+        // 初期化時のステータス表示
+        statusDiv.textContent = 'アプリケーション起動完了 ✨';
+    </script>
+</body>
+</html>
