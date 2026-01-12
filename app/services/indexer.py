@@ -15,8 +15,94 @@ from app.db.models import CrawlJob, SearchContent, PageAnalysis
 logger = logging.getLogger(__name__)
 
 
+class ContentClassifier:
+    """Content type classifier with enhanced detection."""
+    
+    # Content types that should be indexed
+    INDEXABLE_TYPES = {'text_article'}  # Only blog/text articles
+    
+    # Content types to explicitly reject
+    REJECTED_TYPES = {
+        'video', 'image', 'pdf',
+        'code_repository', 'social_media',
+        'manga', 'official_site', 'streaming',
+    }
+    
+    @staticmethod
+    def classify_by_url(url: str) -> str:
+        """Classify content type based on URL pattern.
+        
+        Args:
+            url: URL to classify
+        
+        Returns:
+            Content type string
+        """
+        url_lower = url.lower()
+        
+        # Official site indicators (very strict)
+        official_patterns = [
+            'www.',
+            '/official',
+            '/about',
+            '/company',
+            '/products',
+            '/service',
+            '/contact',
+        ]
+        if any(p in url_lower for p in official_patterns):
+            return "official_site"
+        
+        # Streaming/Video sites
+        if any(x in url_lower for x in [
+            "youtube.com", "youtu.be",
+            "vimeo.com", "dailymotion.com",
+            "netflix.com", "hulu.com",
+            "twitch.tv", "niconico.jp",
+            "/video", "/videos", "/stream",
+            ".mp4", ".webm", ".mov",
+        ]):
+            return "streaming"
+        
+        # Manga/Comic sites
+        if any(x in url_lower for x in [
+            "manga", "manganelo", "mangakakalot",
+            "webtoon", "comic", "doujin",
+            "pixiv", "booth", "dlsite",
+            "/ch/", "/episode",
+        ]):
+            return "manga"
+        
+        # Image galleries
+        if any(x in url_lower for x in [
+            ".jpg", ".png", ".gif", ".webp",
+            "/image", "/images", "/photo", "/gallery",
+            "imgur", "flickr", "500px",
+        ]):
+            return "image"
+        
+        # PDF documents
+        if any(x in url_lower for x in [".pdf", "/pdf"]):
+            return "pdf"
+        
+        # Code repositories
+        if any(x in url_lower for x in ["/github", "/gitlab", "/bitbucket"]):
+            return "code_repository"
+        
+        # Social media
+        if any(x in url_lower for x in [
+            "/twitter", "/facebook", "/instagram", "/tiktok",
+            "twitter.com", "facebook.com", "instagram.com",
+            "tiktok.com", "x.com"
+        ]):
+            return "social_media"
+        
+        # Default to text article (blog posts, news, etc.)
+        return "text_article"
+
+
 class QualityScoreCalculator:
-    """Enhanced quality score calculation with multiple factors."""
+    """Enhanced quality score calculation with content type filtering."""
     
     # Quality score thresholds
     MIN_QUALITY_SCORE = 0.45  # Minimum score to be indexed
@@ -30,6 +116,7 @@ class QualityScoreCalculator:
     
     @staticmethod
     def calculate(
+        content_type: str,
         extractor: 'HTMLMetadataExtractor',
         content: str,
         url: str,
@@ -39,6 +126,7 @@ class QualityScoreCalculator:
         """Calculate comprehensive quality score.
         
         Args:
+            content_type: Detected content type (from ContentClassifier)
             extractor: HTMLMetadataExtractor with extracted metadata
             content: Full HTML content
             url: Page URL
@@ -50,7 +138,20 @@ class QualityScoreCalculator:
             - score: Final quality score (0-1)
             - factors: Individual scoring factors
             - reject_reason: Why page was rejected (if any)
+            - should_index: Whether to index this content
         """
+        # ❌ REJECT non-text-article types immediately
+        if content_type != 'text_article':
+            reject_reason = f"unsupported_content_type({content_type})"
+            logger.debug(f"Content type filter: {url} → {reject_reason}")
+            return {
+                'score': 0.0,
+                'factors': {'content_type_filter': 0.0},
+                'reject_reason': reject_reason,
+                'should_index': False,
+                'content_type': content_type,
+            }
+        
         factors = {}
         reject_reasons = []
         
@@ -155,6 +256,7 @@ class QualityScoreCalculator:
             'factors': factors,
             'reject_reason': reject_reason,
             'should_index': final_score >= QualityScoreCalculator.MIN_QUALITY_SCORE and not reject_reasons,
+            'content_type': content_type,
         }
 
 
@@ -206,36 +308,6 @@ class HTMLMetadataExtractor(HTMLParser):
             self.h2_tags.append(self.current_text.strip())
             self.current_text = ""
         self.current_tag = None
-
-
-class ContentClassifier:
-    """Simple content type classifier based on URL patterns."""
-    
-    @staticmethod
-    def classify_by_url(url: str) -> str:
-        """Classify content type based on URL pattern.
-        
-        Args:
-            url: URL to classify
-        
-        Returns:
-            Content type string (default: 'text_article')
-        """
-        url_lower = url.lower()
-        
-        # Detect by URL patterns
-        if any(x in url_lower for x in [".mp4", ".webm", ".mov", "/video", "/videos"]):
-            return "video"
-        elif any(x in url_lower for x in [".jpg", ".png", ".gif", ".webp", "/image", "/images"]):
-            return "image"
-        elif any(x in url_lower for x in [".pdf", "/pdf"]):
-            return "pdf"
-        elif any(x in url_lower for x in ["/github", "/gitlab", "/bitbucket"]):
-            return "code_repository"
-        elif any(x in url_lower for x in ["/twitter", "/facebook", "/instagram", "/tiktok"]):
-            return "social_media"
-        else:
-            return "text_article"
 
 
 class ContentIndexer:
@@ -325,12 +397,13 @@ class ContentIndexer:
                 analysis_result = await db.execute(analysis_stmt)
                 analysis = analysis_result.scalar_one_or_none()
                 
-                # Classify content
+                # Classify content type first
                 content_type = self.classifier.classify_by_url(url)
                 logger.debug(f"[{job_key}] Classified as: {content_type}")
                 
-                # Calculate quality score with enhanced logic
+                # Calculate quality score with content type filtering
                 quality_result = self.quality_calculator.calculate(
+                    content_type=content_type,
                     extractor=extractor,
                     content=html_content,
                     url=url,
@@ -341,17 +414,18 @@ class ContentIndexer:
                 quality_score = quality_result['score']
                 reject_reason = quality_result['reject_reason']
                 
-                # ✅ Enforce quality filtering
+                # ❌ Enforce quality filtering and content type filtering
                 if not quality_result['should_index']:
                     logger.warning(
-                        f"⏭️  [{job_key}] FILTERED OUT: {url} "
-                        f"(score={quality_score:.2f}, reason={reject_reason})"
+                        f"⛔ [{job_key}] FILTERED OUT: {url} "
+                        f"(type={content_type}, score={quality_score:.2f}, reason={reject_reason})"
                     )
                     # Mark job as indexed but record rejection reason
                     job.metadata_json = {
                         "indexed_at": datetime.utcnow().isoformat(),
                         "rejected": True,
                         "reject_reason": reject_reason,
+                        "content_type": content_type,
                         "quality_score": quality_score,
                         "quality_factors": quality_result['factors'],
                     }
