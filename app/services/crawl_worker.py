@@ -57,13 +57,13 @@ class WorkerMetrics:
 class CrawlWorker:
     """Worker that processes crawl jobs from the queue with optimized management."""
     
-    def __init__(self, max_concurrent_jobs: int = 3, poll_interval: int = 5):
+    def __init__(self, max_concurrent_jobs: int = 12, poll_interval: int = 2):
         """
         Initialize crawl worker.
         
         Args:
-            max_concurrent_jobs: Maximum concurrent crawls to run
-            poll_interval: How often to check for new jobs (seconds)
+            max_concurrent_jobs: Maximum concurrent crawls to run (increased from 3 to 12)
+            poll_interval: How often to check for new jobs in seconds (decreased from 5 to 2)
         """
         self.max_concurrent_jobs = max_concurrent_jobs
         self.poll_interval = poll_interval
@@ -75,13 +75,13 @@ class CrawlWorker:
     
     async def get_pending_jobs(
         self,
-        limit: int = 10,
+        limit: int = 20,
         session_id: Optional[str] = None,
     ) -> List[CrawlJob]:
         """Get pending crawl jobs from database with priority sorting.
         
         Args:
-            limit: Maximum number of jobs to fetch
+            limit: Maximum number of jobs to fetch (increased from 10 to 20)
             session_id: Filter by specific session (optional)
         
         Returns:
@@ -117,13 +117,13 @@ class CrawlWorker:
                     )
                 else:
                     logger.debug(
-                        f"ℹ️ No pending jobs (available slots: {self.max_concurrent_jobs - len(self.active_jobs)})"
+                        f"\u2139\ufe0f No pending jobs (available slots: {self.max_concurrent_jobs - len(self.active_jobs)})"
                     )
                 
                 return list(jobs)
         
         except Exception as e:
-            logger.error(f"❌ Error fetching pending jobs: {e}", exc_info=True)
+            logger.error(f"\u274c Error fetching pending jobs: {e}", exc_info=True)
             return []
     
     async def process_job(self, job: CrawlJob, startup_mode: bool = False) -> bool:
@@ -145,7 +145,7 @@ class CrawlWorker:
             # VALIDATION: Check URL is valid before processing
             if not job.url or job.url.strip() == "":
                 logger.error(
-                    f"❌ Job {job_key} has invalid URL: {repr(job.url)}. "
+                    f"\u274c Job {job_key} has invalid URL: {repr(job.url)}. "
                     f"Marking as failed."
                 )
                 await crawler_service.update_crawl_job_status(job_id, "failed")
@@ -153,7 +153,7 @@ class CrawlWorker:
                 return False
             
             logger.info(
-                f"🔄 Processing job {job_key}: {job.url} (depth: {job.depth})" +
+                f"\ud83d\udd04 Processing job {job_key}: {job.url} (depth: {job.depth})" +
                 (" [STARTUP]" if startup_mode else "")
             )
             self.metrics.total_processed += 1
@@ -199,19 +199,19 @@ class CrawlWorker:
                 self.metrics.total_queued += len(urls_to_crawl)
                 
                 logger.info(
-                    f"✅ Job {job_key} completed in {execution_time:.0f}ms"
-                    + (f" → {len(urls_to_crawl)} URLs queued" if not startup_mode else " (startup mode)")
+                    f"\u2705 Job {job_key} completed in {execution_time:.0f}ms"
+                    + (f" \u2192 {len(urls_to_crawl)} URLs queued" if not startup_mode else " (startup mode)")
                 )
                 self.metrics.total_successful += 1
                 return True
             else:
-                logger.warning(f"⚠️ Job {job_key} failed (execution time: {execution_time:.0f}ms)")
+                logger.warning(f"\u26a0\ufe0f  Job {job_key} failed (execution time: {execution_time:.0f}ms)")
                 self.metrics.total_failed += 1
                 return False
         
         except Exception as e:
             execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
-            logger.error(f"❌ Error processing job {job_key}: {e} (execution time: {execution_time:.0f}ms)", exc_info=True)
+            logger.error(f"\u274c Error processing job {job_key}: {e} (execution time: {execution_time:.0f}ms)", exc_info=True)
             
             # Try to mark job as failed
             try:
@@ -260,7 +260,7 @@ class CrawlWorker:
             }
         
         except Exception as e:
-            logger.error(f"❌ Error getting worker status: {e}", exc_info=True)
+            logger.error(f"\u274c Error getting worker status: {e}", exc_info=True)
             return {}
     
     async def get_session_stats(self, session_id: str) -> Dict[str, Any]:
@@ -316,7 +316,7 @@ class CrawlWorker:
                 return stats
         
         except Exception as e:
-            logger.error(f"❌ Error getting session stats: {e}", exc_info=True)
+            logger.error(f"\u274c Error getting session stats: {e}", exc_info=True)
             return {}
     
     async def worker_loop(self):
@@ -336,8 +336,8 @@ class CrawlWorker:
                     available_slots = self.max_concurrent_jobs - len(self.active_jobs)
                     
                     if available_slots > 0:
-                        # Fetch pending jobs
-                        pending_jobs = await self.get_pending_jobs(limit=available_slots)
+                        # Fetch pending jobs (more aggressively)
+                        pending_jobs = await self.get_pending_jobs(limit=available_slots * 2)
                         
                         if pending_jobs:
                             consecutive_empty_polls = 0
@@ -346,11 +346,11 @@ class CrawlWorker:
                             # Determine if we're processing startup queue
                             startup_mode = self.is_first_run
                             if startup_mode:
-                                logger.info(f"📥 Starting {len(pending_jobs)} startup queue jobs")
+                                logger.info(f"\ud83d\udce5 Starting {len(pending_jobs)} startup queue jobs")
                                 self.is_first_run = False  # Only first run uses startup mode
                             else:
                                 logger.info(
-                                    f"📥 Starting {len(pending_jobs)} jobs "
+                                    f"\ud83d\udce5 Starting {len(pending_jobs)} jobs "
                                     f"(active: {len(self.active_jobs)}/{self.max_concurrent_jobs})"
                                 )
                             
@@ -365,13 +365,13 @@ class CrawlWorker:
                             # Adaptive polling: increase interval when queue is empty
                             if len(self.active_jobs) == 0:
                                 consecutive_empty_polls += 1
-                                # Gradually increase poll interval up to 30 seconds
+                                # Gradually increase poll interval up to 15 seconds
                                 adaptive_poll_interval = min(
-                                    self.poll_interval + (consecutive_empty_polls * 2),
-                                    30
+                                    self.poll_interval + (consecutive_empty_polls * 1),
+                                    15
                                 )
                                 logger.debug(
-                                    f"⏳ No pending jobs, idle... "
+                                    f"\u23f3 No pending jobs, idle... "
                                     f"(adaptive poll_interval: {adaptive_poll_interval}s)"
                                 )
                     
@@ -380,52 +380,53 @@ class CrawlWorker:
                     for job_id in completed:
                         try:
                             result = self.active_jobs[job_id].result()
-                            logger.debug(f"✨ Job {job_id[:8]} task completed (result: {result})")
+                            logger.debug(f"\u2728 Job {job_id[:8]} task completed (result: {result})")
                         except asyncio.CancelledError:
-                            logger.warning(f"⚠️ Job {job_id[:8]} task was cancelled")
+                            logger.warning(f"\u26a0\ufe0f  Job {job_id[:8]} task was cancelled")
                         except Exception as e:
-                            logger.error(f"❌ Job {job_id[:8]} task error: {e}")
+                            logger.error(f"\u274c Job {job_id[:8]} task error: {e}")
                         finally:
                             del self.active_jobs[job_id]
                     
-                    # Wait before next poll (using adaptive interval)
+                    # Wait before next poll (using adaptive interval, but much shorter)
                     await asyncio.sleep(adaptive_poll_interval)
                 
                 except asyncio.CancelledError:
-                    logger.info("⏹️ Worker loop cancelled")
+                    logger.info("\u23f9\ufe0f  Worker loop cancelled")
                     raise
                 except Exception as e:
-                    logger.error(f"❌ Worker loop error: {e}", exc_info=True)
+                    logger.error(f"\u274c Worker loop error: {e}", exc_info=True)
                     await asyncio.sleep(adaptive_poll_interval)
         
         finally:
             logger.info(
-                f"🛑 Crawl worker stopped "
+                f"\ud83d\uded1 Crawl worker stopped "
                 f"(stats: {self.metrics.to_dict()})"
             )
     
     async def stop(self):
         """Stop the crawl worker and wait for active jobs."""
-        logger.info(f"🙋 Stopping crawl worker (active jobs: {len(self.active_jobs)})...")
+        logger.info(f"\ud83d\ude4b Stopping crawl worker (active jobs: {len(self.active_jobs)})...")
         self.is_running = False
         
         # Wait for active jobs to complete
         if self.active_jobs:
-            logger.info(f"⏳ Waiting for {len(self.active_jobs)} active jobs to complete...")
+            logger.info(f"\u23f3 Waiting for {len(self.active_jobs)} active jobs to complete...")
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*self.active_jobs.values(), return_exceptions=True),
                     timeout=30.0
                 )
             except asyncio.TimeoutError:
-                logger.warning("⚠️ Some jobs did not complete in time")
+                logger.warning("\u26a0\ufe0f  Some jobs did not complete in time")
                 # Force cancel remaining tasks
                 for task in self.active_jobs.values():
                     if not task.done():
                         task.cancel()
         
-        logger.info(f"✅ Crawl worker cleanup complete")
+        logger.info(f"\u2705 Crawl worker cleanup complete")
 
 
 # Global worker instance
-crawl_worker = CrawlWorker(max_concurrent_jobs=3, poll_interval=5)
+# 🚀 OPTIMIZED: max_concurrent_jobs=12 (was 3), poll_interval=2 (was 5)
+crawl_worker = CrawlWorker(max_concurrent_jobs=12, poll_interval=2)
