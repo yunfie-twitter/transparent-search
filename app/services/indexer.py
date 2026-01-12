@@ -15,6 +15,149 @@ from app.db.models import CrawlJob, SearchContent, PageAnalysis
 logger = logging.getLogger(__name__)
 
 
+class QualityScoreCalculator:
+    """Enhanced quality score calculation with multiple factors."""
+    
+    # Quality score thresholds
+    MIN_QUALITY_SCORE = 0.45  # Minimum score to be indexed
+    EXCELLENT_SCORE = 0.8
+    GOOD_SCORE = 0.6
+    
+    # Content requirements
+    MIN_TITLE_LENGTH = 5
+    MIN_CONTENT_LENGTH = 100
+    MAX_TITLE_LENGTH = 200
+    
+    @staticmethod
+    def calculate(
+        extractor: 'HTMLMetadataExtractor',
+        content: str,
+        url: str,
+        analysis_score: Optional[float] = None,
+        page_value_score: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Calculate comprehensive quality score.
+        
+        Args:
+            extractor: HTMLMetadataExtractor with extracted metadata
+            content: Full HTML content
+            url: Page URL
+            analysis_score: PageAnalysis score (0-100)
+            page_value_score: CrawlJob page value score (0-100)
+        
+        Returns:
+            Dictionary with:
+            - score: Final quality score (0-1)
+            - factors: Individual scoring factors
+            - reject_reason: Why page was rejected (if any)
+        """
+        factors = {}
+        reject_reasons = []
+        
+        # 1. Content length check (critical)
+        content_length = len(content.strip())
+        if content_length < QualityScoreCalculator.MIN_CONTENT_LENGTH:
+            reject_reasons.append(f"too_short_content({content_length}chars)")
+            factors['content_length'] = 0.1
+        else:
+            # Score based on content length (100-5000 chars optimal)
+            if content_length > 5000:
+                factors['content_length'] = 1.0
+            else:
+                factors['content_length'] = min(1.0, content_length / 5000)
+        
+        # 2. Title quality (important)
+        title = extractor.og_title or extractor.title or ""
+        title_length = len(title.strip())
+        
+        if title_length < QualityScoreCalculator.MIN_TITLE_LENGTH:
+            reject_reasons.append(f"poor_title({title_length}chars)")
+            factors['title_quality'] = 0.2
+        else:
+            # Title quality score
+            if title_length > QualityScoreCalculator.MAX_TITLE_LENGTH:
+                factors['title_quality'] = 0.7  # Too long
+            else:
+                factors['title_quality'] = 0.9  # Good
+        
+        # 3. Structured data (metadata)
+        metadata_score = 0.5
+        if extractor.meta_description:
+            metadata_score += 0.2
+        if extractor.og_title or extractor.og_description:
+            metadata_score += 0.2
+        if extractor.h1_tags:
+            metadata_score += 0.1
+        factors['metadata_quality'] = min(1.0, metadata_score)
+        
+        # 4. Analysis score (if available)
+        if analysis_score is not None:
+            analysis_normalized = max(0, min(1.0, analysis_score / 100))
+            factors['analysis_score'] = analysis_normalized
+        
+        # 5. Page value score (if available)
+        if page_value_score is not None:
+            page_value_normalized = max(0, min(1.0, page_value_score / 100))
+            factors['page_value_score'] = page_value_normalized
+        
+        # 6. URL quality (avoid suspicious patterns)
+        url_score = 1.0
+        url_lower = url.lower()
+        
+        # Check for spam indicators
+        spam_patterns = [
+            '/download', '/redirect', '/click',
+            '/ads', '/ad/', '/banner',
+            'utm_', 'tracking', 'referrer=',
+        ]
+        for pattern in spam_patterns:
+            if pattern in url_lower:
+                url_score -= 0.1
+                reject_reasons.append(f"spam_url_pattern({pattern})")
+        
+        factors['url_quality'] = max(0.3, url_score)
+        
+        # Calculate weighted final score
+        # Weight higher factors more
+        weights = {
+            'content_length': 0.25,
+            'title_quality': 0.20,
+            'metadata_quality': 0.15,
+            'url_quality': 0.15,
+            'analysis_score': 0.15,
+            'page_value_score': 0.10,
+        }
+        
+        final_score = 0.0
+        total_weight = 0.0
+        for factor_name, weight in weights.items():
+            if factor_name in factors:
+                final_score += factors[factor_name] * weight
+                total_weight += weight
+        
+        if total_weight > 0:
+            final_score = final_score / total_weight
+        else:
+            final_score = 0.5
+        
+        # Round to 2 decimals
+        final_score = round(final_score, 2)
+        
+        # Determine reject reason
+        reject_reason = None
+        if final_score < QualityScoreCalculator.MIN_QUALITY_SCORE:
+            reject_reason = f"low_score({final_score})"
+        if reject_reasons and not reject_reason:
+            reject_reason = " + ".join(reject_reasons[:2])
+        
+        return {
+            'score': final_score,
+            'factors': factors,
+            'reject_reason': reject_reason,
+            'should_index': final_score >= QualityScoreCalculator.MIN_QUALITY_SCORE and not reject_reasons,
+        }
+
+
 class HTMLMetadataExtractor(HTMLParser):
     """Extract metadata from HTML content."""
     
@@ -100,6 +243,7 @@ class ContentIndexer:
     
     def __init__(self):
         self.classifier = ContentClassifier()
+        self.quality_calculator = QualityScoreCalculator()
     
     def _extract_title(self, extractor: HTMLMetadataExtractor, url: str) -> str:
         """Extract best available title from page metadata.
@@ -142,7 +286,7 @@ class ContentIndexer:
             url: URL that was crawled
         
         Returns:
-            SearchContent record or None if indexing failed
+            SearchContent record or None if indexing failed or filtered
         """
         job_key = job_id[:8]
         logger.info(f"📇 [{job_key}] Indexing: {url}")
@@ -185,12 +329,34 @@ class ContentIndexer:
                 content_type = self.classifier.classify_by_url(url)
                 logger.debug(f"[{job_key}] Classified as: {content_type}")
                 
-                # Determine quality score
-                quality_score = 0.5
-                if analysis:
-                    quality_score = analysis.total_score / 100 if analysis.total_score else 0.5
-                elif job.page_value_score:
-                    quality_score = job.page_value_score / 100
+                # Calculate quality score with enhanced logic
+                quality_result = self.quality_calculator.calculate(
+                    extractor=extractor,
+                    content=html_content,
+                    url=url,
+                    analysis_score=analysis.total_score if analysis else None,
+                    page_value_score=job.page_value_score,
+                )
+                
+                quality_score = quality_result['score']
+                reject_reason = quality_result['reject_reason']
+                
+                # ✅ Enforce quality filtering
+                if not quality_result['should_index']:
+                    logger.warning(
+                        f"⏭️  [{job_key}] FILTERED OUT: {url} "
+                        f"(score={quality_score:.2f}, reason={reject_reason})"
+                    )
+                    # Mark job as indexed but record rejection reason
+                    job.metadata_json = {
+                        "indexed_at": datetime.utcnow().isoformat(),
+                        "rejected": True,
+                        "reject_reason": reject_reason,
+                        "quality_score": quality_score,
+                        "quality_factors": quality_result['factors'],
+                    }
+                    await db.commit()
+                    return None
                 
                 # ✅ Extract title using priority chain
                 title = self._extract_title(extractor, url)
@@ -221,6 +387,7 @@ class ContentIndexer:
                     "indexed_at": now.isoformat(),
                     "content_type": content_type,
                     "quality_score": quality_score,
+                    "quality_factors": quality_result['factors'],
                     "title_source": (
                         "og:title" if extractor.og_title else
                         "title_tag" if extractor.title else
@@ -275,6 +442,7 @@ class ContentIndexer:
                 indexed_count = 0
                 skipped_count = 0
                 failed_count = 0
+                filtered_count = 0
                 
                 for job in jobs:
                     # Check if already indexed
@@ -299,19 +467,25 @@ class ContentIndexer:
                     if result:
                         indexed_count += 1
                     else:
-                        failed_count += 1
+                        # Check if filtered or failed
+                        if job.metadata_json and job.metadata_json.get('rejected'):
+                            filtered_count += 1
+                        else:
+                            failed_count += 1
                 
                 logger.info(
                     f"✨ Session {session_id}: "
-                    f"indexed={indexed_count}, skipped={skipped_count}, failed={failed_count}"
+                    f"indexed={indexed_count}, filtered={filtered_count}, "
+                    f"skipped={skipped_count}, failed={failed_count}"
                 )
                 
                 return {
                     "session_id": session_id,
                     "indexed": indexed_count,
+                    "filtered": filtered_count,
                     "skipped": skipped_count,
                     "failed": failed_count,
-                    "total_processed": indexed_count + skipped_count + failed_count,
+                    "total_processed": indexed_count + filtered_count + skipped_count + failed_count,
                 }
         
         except Exception as e:
@@ -320,6 +494,7 @@ class ContentIndexer:
                 "session_id": session_id,
                 "error": str(e),
                 "indexed": 0,
+                "filtered": 0,
                 "skipped": 0,
                 "failed": 0,
             }
@@ -355,6 +530,7 @@ class ContentIndexer:
                 indexed_count = 0
                 skipped_count = 0
                 failed_count = 0
+                filtered_count = 0
                 
                 for job in jobs:
                     # Check if already indexed
@@ -379,19 +555,25 @@ class ContentIndexer:
                     if result:
                         indexed_count += 1
                     else:
-                        failed_count += 1
+                        # Check if filtered or failed
+                        if job.metadata_json and job.metadata_json.get('rejected'):
+                            filtered_count += 1
+                        else:
+                            failed_count += 1
                 
                 logger.info(
                     f"✨ Domain {domain}: "
-                    f"indexed={indexed_count}, skipped={skipped_count}, failed={failed_count}"
+                    f"indexed={indexed_count}, filtered={filtered_count}, "
+                    f"skipped={skipped_count}, failed={failed_count}"
                 )
                 
                 return {
                     "domain": domain,
                     "indexed": indexed_count,
+                    "filtered": filtered_count,
                     "skipped": skipped_count,
                     "failed": failed_count,
-                    "total_processed": indexed_count + skipped_count + failed_count,
+                    "total_processed": indexed_count + filtered_count + skipped_count + failed_count,
                 }
         
         except Exception as e:
@@ -400,6 +582,7 @@ class ContentIndexer:
                 "domain": domain,
                 "error": str(e),
                 "indexed": 0,
+                "filtered": 0,
                 "skipped": 0,
                 "failed": 0,
             }
