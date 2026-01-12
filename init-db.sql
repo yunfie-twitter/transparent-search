@@ -38,18 +38,3 @@ END $$;
 -- Grant basic privileges
 GRANT CONNECT ON DATABASE postgres TO search_user;
 GRANT ALL PRIVILEGES ON DATABASE transparent_search TO search_user;
-
--- Grant schema privileges on transparent_search
-\c transparent_search
-
-GRANT ALL PRIVILEGES ON SCHEMA public TO search_user;
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO search_user;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO search_user;
-GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO search_user;
-
--- Set default privileges for future objects
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO search_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO search_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON FUNCTIONS TO search_user;
-
-RAISE NOTICE 'PostgreSQL initialization completed successfully';
