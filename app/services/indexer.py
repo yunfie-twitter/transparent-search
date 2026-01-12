@@ -5,6 +5,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 from urllib.parse import urlparse
 from html.parser import HTMLParser
+import re
 
 from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -91,18 +92,161 @@ class ContentClassifier:
         return "blog"
 
 
+class ContentTypeEvaluator:
+    """Content-type-specific quality evaluation.
+    
+    Each content type has different quality criteria:
+    - Blog: Rich metadata, well-structured, clear authorship
+    - Video: Transcripts, descriptions, engagement metrics
+    - Manga: Visual consistency, chapter structure, metadata
+    - Official: Structured data, domain authority
+    - Image: Alt text, resolution, usage rights
+    """
+    
+    # Type-specific minimum scores
+    MIN_SCORES = {
+        "blog": 0.50,              # Blog articles: balanced requirements
+        "video": 0.45,             # Video: can't extract all metadata
+        "manga": 0.48,             # Manga: visual focus, less text
+        "image": 0.40,             # Image: minimal metadata available
+        "pdf": 0.52,               # PDF: structured but limited HTML
+        "official_site": 0.55,     # Official: high quality expected
+        "code_repository": 0.60,   # Code: highly technical, should be good
+        "social_media": 0.35,      # Social: low barrier to entry
+    }
+    
+    # Type-specific weights for quality factors
+    FACTOR_WEIGHTS = {
+        "blog": {
+            "content_length": 0.25,
+            "title_quality": 0.20,
+            "metadata_quality": 0.20,
+            "url_quality": 0.15,
+            "analysis_score": 0.12,
+            "page_value_score": 0.08,
+        },
+        "video": {
+            "content_length": 0.15,          # Video description, not full content
+            "title_quality": 0.25,           # Title is crucial for video
+            "metadata_quality": 0.25,        # OG tags, transcripts
+            "url_quality": 0.15,
+            "analysis_score": 0.12,
+            "page_value_score": 0.08,
+        },
+        "manga": {
+            "content_length": 0.10,          # Visual content, not text
+            "title_quality": 0.25,           # Series name critical
+            "metadata_quality": 0.30,        # Chapter info, tags
+            "url_quality": 0.15,
+            "analysis_score": 0.12,
+            "page_value_score": 0.08,
+        },
+        "image": {
+            "content_length": 0.08,          # Minimal text
+            "title_quality": 0.20,
+            "metadata_quality": 0.35,        # Alt text, tags
+            "url_quality": 0.15,
+            "analysis_score": 0.12,
+            "page_value_score": 0.10,
+        },
+        "pdf": {
+            "content_length": 0.25,
+            "title_quality": 0.20,
+            "metadata_quality": 0.20,
+            "url_quality": 0.15,
+            "analysis_score": 0.12,
+            "page_value_score": 0.08,
+        },
+        "official_site": {
+            "content_length": 0.20,
+            "title_quality": 0.15,
+            "metadata_quality": 0.25,        # Highly structured
+            "url_quality": 0.20,             # Authority matters
+            "analysis_score": 0.12,
+            "page_value_score": 0.08,
+        },
+        "code_repository": {
+            "content_length": 0.30,          # Code complexity
+            "title_quality": 0.15,
+            "metadata_quality": 0.20,        # README, docs
+            "url_quality": 0.15,
+            "analysis_score": 0.12,
+            "page_value_score": 0.08,
+        },
+        "social_media": {
+            "content_length": 0.20,
+            "title_quality": 0.15,
+            "metadata_quality": 0.15,
+            "url_quality": 0.20,
+            "analysis_score": 0.20,          # Recent engagement important
+            "page_value_score": 0.10,
+        },
+    }
+    
+    @staticmethod
+    def get_min_score(content_type: str) -> float:
+        """Get minimum quality score for content type."""
+        return ContentTypeEvaluator.MIN_SCORES.get(content_type, 0.50)
+    
+    @staticmethod
+    def get_weights(content_type: str) -> Dict[str, float]:
+        """Get quality factor weights for content type."""
+        return ContentTypeEvaluator.FACTOR_WEIGHTS.get(
+            content_type,
+            ContentTypeEvaluator.FACTOR_WEIGHTS["blog"]  # Default to blog weights
+        )
+    
+    @staticmethod
+    def evaluate_for_type(
+        content_type: str,
+        factors: Dict[str, float],
+    ) -> float:
+        """Calculate weighted quality score for specific content type.
+        
+        Args:
+            content_type: Content type string
+            factors: Dictionary of quality factors (0-1 scale)
+        
+        Returns:
+            Weighted quality score (0-1 scale)
+        """
+        weights = ContentTypeEvaluator.get_weights(content_type)
+        
+        score = 0.0
+        total_weight = 0.0
+        
+        for factor_name, weight in weights.items():
+            if factor_name in factors:
+                score += factors[factor_name] * weight
+                total_weight += weight
+        
+        if total_weight > 0:
+            score = score / total_weight
+        else:
+            score = 0.5
+        
+        return round(score, 2)
+
+
 class QualityScoreCalculator:
-    """Enhanced quality score calculation - evaluates all content types equally."""
+    """Enhanced quality score calculation with content-type-specific criteria."""
     
-    # Quality score thresholds
-    MIN_QUALITY_SCORE = 0.45  # Minimum score to be indexed (applies to ALL types)
-    EXCELLENT_SCORE = 0.8
-    GOOD_SCORE = 0.6
-    
-    # Content requirements
+    # Content requirements (base)
     MIN_TITLE_LENGTH = 5
-    MIN_CONTENT_LENGTH = 100
+    MIN_CONTENT_LENGTH = 50      # Relaxed for non-text content
     MAX_TITLE_LENGTH = 200
+    
+    # Type-specific content requirements
+    TYPE_CONTENT_REQUIREMENTS = {
+        "blog": 100,           # Blog articles should have decent content
+        "video": 30,           # Video descriptions can be short
+        "manga": 50,           # Manga metadata sufficient
+        "image": 20,           # Images just need basic metadata
+        "pdf": 100,            # PDFs should be substantial
+        "official_site": 80,   # Official pages should be complete
+        "code_repository": 120,# Code projects should be detailed
+        "social_media": 10,    # Social posts can be very short
+    }
     
     @staticmethod
     def calculate(
@@ -113,13 +257,10 @@ class QualityScoreCalculator:
         analysis_score: Optional[float] = None,
         page_value_score: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Calculate comprehensive quality score.
-        
-        All content types (blog, manga, video, official_site, etc.) are evaluated
-        using the same criteria. No discrimination based on content type.
+        """Calculate comprehensive quality score with type-specific criteria.
         
         Args:
-            content_type: Detected content type (informational only)
+            content_type: Detected content type
             extractor: HTMLMetadataExtractor with extracted metadata
             content: Full HTML content
             url: Page URL
@@ -127,117 +268,164 @@ class QualityScoreCalculator:
             page_value_score: CrawlJob page value score (0-100)
         
         Returns:
-            Dictionary with:
-            - score: Final quality score (0-1)
-            - factors: Individual scoring factors
-            - reject_reason: Why page was rejected (if any)
-            - should_index: Whether to index this content
+            Dictionary with quality metrics and indexing decision
         """
         factors = {}
         reject_reasons = []
         
-        # 1. Content length check (critical)
+        # Get type-specific minimum content length
+        min_content_length = QualityScoreCalculator.TYPE_CONTENT_REQUIREMENTS.get(
+            content_type,
+            QualityScoreCalculator.MIN_CONTENT_LENGTH
+        )
+        
+        # 1. Content length check
         content_length = len(content.strip())
-        if content_length < QualityScoreCalculator.MIN_CONTENT_LENGTH:
-            reject_reasons.append(f"too_short_content({content_length}chars)")
-            factors['content_length'] = 0.1
+        if content_length < min_content_length:
+            reject_reasons.append(f"insufficient_content({content_length}/{min_content_length})")
+            factors['content_length'] = max(0.1, content_length / min_content_length * 0.5)
         else:
-            # Score based on content length (100-5000 chars optimal)
-            if content_length > 5000:
+            # Score based on content length (optimal varies by type)
+            optimal_length = min_content_length * 10
+            if content_length > optimal_length:
                 factors['content_length'] = 1.0
             else:
-                factors['content_length'] = min(1.0, content_length / 5000)
+                factors['content_length'] = min(1.0, content_length / optimal_length)
         
-        # 2. Title quality (important)
+        # 2. Title quality
         title = extractor.og_title or extractor.title or ""
         title_length = len(title.strip())
         
         if title_length < QualityScoreCalculator.MIN_TITLE_LENGTH:
-            reject_reasons.append(f"poor_title({title_length}chars)")
-            factors['title_quality'] = 0.2
+            reject_reasons.append(f"missing_title")
+            factors['title_quality'] = 0.1
         else:
-            # Title quality score
+            # Penalize excessively long titles
             if title_length > QualityScoreCalculator.MAX_TITLE_LENGTH:
-                factors['title_quality'] = 0.7  # Too long
+                factors['title_quality'] = 0.6
             else:
-                factors['title_quality'] = 0.9  # Good
+                factors['title_quality'] = 0.95
         
-        # 3. Structured data (metadata)
-        metadata_score = 0.5
+        # 3. Metadata completeness (type-specific)
+        metadata_score = 0.3  # Base score
+        
+        # Common metadata
         if extractor.meta_description:
-            metadata_score += 0.2
-        if extractor.og_title or extractor.og_description:
-            metadata_score += 0.2
-        if extractor.h1_tags:
-            metadata_score += 0.1
+            metadata_score += 0.15
+        if extractor.og_title:
+            metadata_score += 0.15
+        if extractor.og_description:
+            metadata_score += 0.10
+        if extractor.og_image_url:
+            metadata_score += 0.10
+        
+        # Type-specific metadata bonuses
+        if content_type == "blog":
+            if extractor.h1_tags and len(extractor.h1_tags) > 0:
+                metadata_score += 0.10
+            if extractor.h2_tags and len(extractor.h2_tags) > 2:
+                metadata_score += 0.05
+        
+        elif content_type == "video":
+            # Video-specific: looks for transcript/description
+            if len(extractor.meta_description or "") > 50:
+                metadata_score += 0.15
+            if "video" in content.lower() or "transcript" in content.lower():
+                metadata_score += 0.05
+        
+        elif content_type == "manga":
+            # Manga: structured metadata important
+            if extractor.h1_tags:  # Series name
+                metadata_score += 0.10
+            if extractor.h2_tags:  # Chapter info
+                metadata_score += 0.10
+        
+        elif content_type == "image":
+            # Image: alt text and tags critical
+            alt_text_count = len(re.findall(r'alt=["\']([^"\']*)["]', content))
+            if alt_text_count > 0:
+                metadata_score += 0.15
+        
+        elif content_type == "official_site":
+            # Official: structured data bonus
+            if extractor.og_title and extractor.og_description:
+                metadata_score += 0.15
+            if "json-ld" in content.lower() or "schema" in content.lower():
+                metadata_score += 0.10
+        
+        elif content_type == "code_repository":
+            # Code: README and documentation indicators
+            if "readme" in content.lower() or "documentation" in content.lower():
+                metadata_score += 0.20
+            if "github" in url.lower() or "gitlab" in url.lower():
+                metadata_score += 0.10
+        
         factors['metadata_quality'] = min(1.0, metadata_score)
         
         # 4. Analysis score (if available)
         if analysis_score is not None:
             analysis_normalized = max(0, min(1.0, analysis_score / 100))
             factors['analysis_score'] = analysis_normalized
+        else:
+            factors['analysis_score'] = 0.5  # Default neutral
         
         # 5. Page value score (if available)
         if page_value_score is not None:
             page_value_normalized = max(0, min(1.0, page_value_score / 100))
             factors['page_value_score'] = page_value_normalized
+        else:
+            factors['page_value_score'] = 0.5  # Default neutral
         
-        # 6. URL quality (avoid suspicious patterns)
+        # 6. URL quality (spam detection)
         url_score = 1.0
         url_lower = url.lower()
         
-        # Check for spam indicators
         spam_patterns = [
             '/download', '/redirect', '/click',
             '/ads', '/ad/', '/banner',
             'utm_', 'tracking', 'referrer=',
+            'onclick', 'onclick=',
         ]
+        
         for pattern in spam_patterns:
             if pattern in url_lower:
-                url_score -= 0.1
-                reject_reasons.append(f"spam_url_pattern({pattern})")
+                url_score -= 0.15
+                reject_reasons.append(f"spam_pattern({pattern})")
         
-        factors['url_quality'] = max(0.3, url_score)
+        # Boost score for known quality domains
+        quality_domains = [
+            "github.com", "medium.com", "dev.to",
+            "stackoverflow.com", "wikipedia.org",
+            "arxiv.org", "nature.com", "science.org",
+        ]
+        if any(domain in url_lower for domain in quality_domains):
+            url_score = min(1.0, url_score + 0.15)
         
-        # Calculate weighted final score
-        # All content types use same weights - no discrimination
-        weights = {
-            'content_length': 0.25,
-            'title_quality': 0.20,
-            'metadata_quality': 0.15,
-            'url_quality': 0.15,
-            'analysis_score': 0.15,
-            'page_value_score': 0.10,
-        }
+        factors['url_quality'] = max(0.2, url_score)
         
-        final_score = 0.0
-        total_weight = 0.0
-        for factor_name, weight in weights.items():
-            if factor_name in factors:
-                final_score += factors[factor_name] * weight
-                total_weight += weight
+        # 7. Calculate weighted final score using type-specific weights
+        final_score = ContentTypeEvaluator.evaluate_for_type(content_type, factors)
         
-        if total_weight > 0:
-            final_score = final_score / total_weight
-        else:
-            final_score = 0.5
+        # 8. Apply type-specific minimum threshold
+        min_score = ContentTypeEvaluator.get_min_score(content_type)
         
-        # Round to 2 decimals
-        final_score = round(final_score, 2)
-        
-        # Determine reject reason
+        # Determine rejection
         reject_reason = None
-        if final_score < QualityScoreCalculator.MIN_QUALITY_SCORE:
-            reject_reason = f"low_score({final_score})"
-        if reject_reasons and not reject_reason:
-            reject_reason = " + ".join(reject_reasons[:2])
+        should_index = final_score >= min_score
+        
+        if final_score < min_score:
+            reject_reason = f"below_threshold({final_score:.2f} < {min_score:.2f})"
+        
+        if reject_reasons and not should_index:
+            reject_reason = " + ".join(reject_reasons[:3])
         
         return {
             'score': final_score,
             'factors': factors,
             'reject_reason': reject_reason,
-            'should_index': final_score >= QualityScoreCalculator.MIN_QUALITY_SCORE and not reject_reasons,
+            'should_index': should_index,
             'content_type': content_type,
+            'min_required_score': min_score,
         }
 
 
@@ -280,7 +468,7 @@ class HTMLMetadataExtractor(HTMLParser):
     
     def handle_endtag(self, tag: str):
         if tag == "title" and self.current_text and not self.title:
-            self.title = self.current_text.strip()[:200]  # Limit to 200 chars
+            self.title = self.current_text.strip()[:200]
             self.current_text = ""
         elif tag == "h1" and self.current_text:
             self.h1_tags.append(self.current_text.strip())
@@ -308,7 +496,6 @@ class ContentIndexer:
         Returns:
             Best available title or URL as fallback
         """
-        # Priority order: og:title > title tag > h1 > domain
         if extractor.og_title:
             return extractor.og_title[:200]
         elif extractor.title:
@@ -316,7 +503,6 @@ class ContentIndexer:
         elif extractor.h1_tags:
             return extractor.h1_tags[0][:200]
         else:
-            # Fallback: use domain/path
             parsed = urlparse(url)
             path_parts = [p for p in parsed.path.split('/') if p]
             if path_parts:
@@ -332,7 +518,7 @@ class ContentIndexer:
     ) -> Optional[SearchContent]:
         """Index a completed crawl job into SearchContent.
         
-        All content types are evaluated equally by quality score.
+        Uses content-type-specific quality criteria.
         
         Args:
             job_id: CrawlJob ID
@@ -344,10 +530,9 @@ class ContentIndexer:
             SearchContent record or None if indexing failed or filtered
         """
         job_key = job_id[:8]
-        logger.info(f"📇 [{job_key}] Indexing: {url}")
+        logger.info(f"🔍 [{job_key}] Processing: {url}")
         
         try:
-            # Fetch the completed job
             async with get_db_session() as db:
                 stmt = select(CrawlJob).where(CrawlJob.job_id == job_id)
                 result = await db.execute(stmt)
@@ -362,10 +547,10 @@ class ContentIndexer:
                     select(SearchContent).where(SearchContent.url == url)
                 )
                 if existing.scalar_one_or_none():
-                    logger.debug(f"[{job_key}] Already indexed: {url}")
+                    logger.debug(f"[{job_key}] Already indexed")
                     return None
                 
-                # Extract metadata from HTML
+                # Extract metadata
                 html_content = job.content or ""
                 extractor = HTMLMetadataExtractor()
                 try:
@@ -373,18 +558,15 @@ class ContentIndexer:
                 except Exception as e:
                     logger.warning(f"[{job_key}] HTML parsing warning: {e}")
                 
-                # Get analysis if available
+                # Get analysis
                 analysis_stmt = select(PageAnalysis).where(
                     PageAnalysis.url == url
                 ).order_by(PageAnalysis.analyzed_at.desc()).limit(1)
                 analysis_result = await db.execute(analysis_stmt)
                 analysis = analysis_result.scalar_one_or_none()
                 
-                # Classify content type (informational only)
+                # Classify and evaluate
                 content_type = self.classifier.classify_by_url(url)
-                logger.debug(f"[{job_key}] Content type: {content_type}")
-                
-                # Calculate quality score (same criteria for all types)
                 quality_result = self.quality_calculator.calculate(
                     content_type=content_type,
                     extractor=extractor,
@@ -397,13 +579,12 @@ class ContentIndexer:
                 quality_score = quality_result['score']
                 reject_reason = quality_result['reject_reason']
                 
-                # Enforce quality filtering (applies equally to all content types)
+                # Filter decision
                 if not quality_result['should_index']:
                     logger.warning(
-                        f"⛔ [{job_key}] FILTERED OUT: {url} "
-                        f"(type={content_type}, score={quality_score:.2f}, reason={reject_reason})"
+                        f"⛔ [{job_key}] FILTERED: {content_type} "
+                        f"(score={quality_score:.2f}, reason={reject_reason})"
                     )
-                    # Mark job as indexed but record rejection reason
                     job.metadata_json = {
                         "indexed_at": datetime.utcnow().isoformat(),
                         "rejected": True,
@@ -415,11 +596,11 @@ class ContentIndexer:
                     await db.commit()
                     return None
                 
-                # Extract title using priority chain
+                # Extract title
                 title = self._extract_title(extractor, url)
-                logger.debug(f"[{job_key}] Extracted title: {title}")
+                logger.debug(f"[{job_key}] Title: {title}")
                 
-                # Create SearchContent record
+                # Create SearchContent
                 now = datetime.utcnow()
                 search_content = SearchContent(
                     url=url,
@@ -439,7 +620,6 @@ class ContentIndexer:
                     last_crawled_at=job.completed_at or now,
                 )
                 
-                # Store metadata in CrawlJob
                 job.metadata_json = {
                     "indexed_at": now.isoformat(),
                     "content_type": content_type,
@@ -459,8 +639,8 @@ class ContentIndexer:
                 await db.refresh(search_content)
                 
                 logger.info(
-                    f"✅ [{job_key}] Indexed: {url} "
-                    f"(type={content_type}, score={quality_score:.2f}, title='{title[:50]}...')"
+                    f"✅ [{job_key}] Indexed: {content_type} "
+                    f"(score={quality_score:.2f}, title='{title[:40]}...')"
                 )
                 return search_content
         
@@ -473,20 +653,11 @@ class ContentIndexer:
         session_id: str,
         skip_existing: bool = True,
     ) -> Dict[str, Any]:
-        """Reindex all completed jobs in a session.
-        
-        Args:
-            session_id: Session ID
-            skip_existing: Skip already indexed URLs
-        
-        Returns:
-            Dictionary with indexing results
-        """
+        """Reindex all completed jobs in a session."""
         logger.info(f"🔄 Reindexing session: {session_id}")
         
         try:
             async with get_db_session() as db:
-                # Get all completed jobs in session
                 stmt = select(CrawlJob).where(
                     and_(
                         CrawlJob.session_id == session_id,
@@ -500,9 +671,9 @@ class ContentIndexer:
                 skipped_count = 0
                 failed_count = 0
                 filtered_count = 0
+                type_stats = {}
                 
                 for job in jobs:
-                    # Check if already indexed
                     if skip_existing:
                         existing = await db.execute(
                             select(SearchContent).where(
@@ -513,7 +684,6 @@ class ContentIndexer:
                             skipped_count += 1
                             continue
                     
-                    # Index the job
                     result = await self.index_crawl_job(
                         job_id=job.job_id,
                         session_id=job.session_id,
@@ -523,8 +693,9 @@ class ContentIndexer:
                     
                     if result:
                         indexed_count += 1
+                        content_type = result.content_type
+                        type_stats[content_type] = type_stats.get(content_type, 0) + 1
                     else:
-                        # Check if filtered or failed
                         if job.metadata_json and job.metadata_json.get('rejected'):
                             filtered_count += 1
                         else:
@@ -535,6 +706,7 @@ class ContentIndexer:
                     f"indexed={indexed_count}, filtered={filtered_count}, "
                     f"skipped={skipped_count}, failed={failed_count}"
                 )
+                logger.info(f"📊 By type: {type_stats}")
                 
                 return {
                     "session_id": session_id,
@@ -542,6 +714,7 @@ class ContentIndexer:
                     "filtered": filtered_count,
                     "skipped": skipped_count,
                     "failed": failed_count,
+                    "by_type": type_stats,
                     "total_processed": indexed_count + filtered_count + skipped_count + failed_count,
                 }
         
@@ -561,20 +734,11 @@ class ContentIndexer:
         domain: str,
         skip_existing: bool = True,
     ) -> Dict[str, Any]:
-        """Reindex all completed jobs for a domain.
-        
-        Args:
-            domain: Domain to reindex
-            skip_existing: Skip already indexed URLs
-        
-        Returns:
-            Dictionary with indexing results
-        """
+        """Reindex all completed jobs for a domain."""
         logger.info(f"🔄 Reindexing domain: {domain}")
         
         try:
             async with get_db_session() as db:
-                # Get all completed jobs for domain
                 stmt = select(CrawlJob).where(
                     and_(
                         CrawlJob.domain == domain,
@@ -588,9 +752,9 @@ class ContentIndexer:
                 skipped_count = 0
                 failed_count = 0
                 filtered_count = 0
+                type_stats = {}
                 
                 for job in jobs:
-                    # Check if already indexed
                     if skip_existing:
                         existing = await db.execute(
                             select(SearchContent).where(
@@ -601,7 +765,6 @@ class ContentIndexer:
                             skipped_count += 1
                             continue
                     
-                    # Index the job
                     result = await self.index_crawl_job(
                         job_id=job.job_id,
                         session_id=job.session_id,
@@ -611,8 +774,9 @@ class ContentIndexer:
                     
                     if result:
                         indexed_count += 1
+                        content_type = result.content_type
+                        type_stats[content_type] = type_stats.get(content_type, 0) + 1
                     else:
-                        # Check if filtered or failed
                         if job.metadata_json and job.metadata_json.get('rejected'):
                             filtered_count += 1
                         else:
@@ -623,6 +787,7 @@ class ContentIndexer:
                     f"indexed={indexed_count}, filtered={filtered_count}, "
                     f"skipped={skipped_count}, failed={failed_count}"
                 )
+                logger.info(f"📊 By type: {type_stats}")
                 
                 return {
                     "domain": domain,
@@ -630,6 +795,7 @@ class ContentIndexer:
                     "filtered": filtered_count,
                     "skipped": skipped_count,
                     "failed": failed_count,
+                    "by_type": type_stats,
                     "total_processed": indexed_count + filtered_count + skipped_count + failed_count,
                 }
         
