@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from sqlalchemy import select, func
 
 from app.core.database import init_db, get_db_session
@@ -209,32 +210,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include API router
+# Include API router (MUST come before mounting static files)
 app.include_router(router, prefix="/api")
 
-# Mount static files
+# ==================== STATIC FILES CONFIGURATION ====================
+# Determine static directory path
 static_dir = Path(__file__).parent / "app" / "static"
+index_html_path = static_dir / "index.html"
+
 if static_dir.exists():
+    # Mount /static directory for CSS, JS, images, etc.
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     logger.info(f"✅ Static files mounted at {static_dir}")
 else:
     logger.warning(f"⚠️ Static directory not found: {static_dir}")
 
 
+# ==================== ROOT ENDPOINT ====================
 @app.get("/")
 async def root():
-    """Root endpoint - serves static index.html if available, otherwise returns status JSON."""
-    # If static files are mounted, FastAPI will serve index.html automatically
-    # This endpoint is a fallback JSON response
-    redis_client = await get_redis_client()
-    return {
-        "status": "ok",
-        "name": "Transparent Search API",
-        "version": "1.0.0",
-        "docs": "/api/docs",
-        "redis": "connected" if redis_client else "disconnected",
-        "ui": "/static/index.html",
-    }
+    """Root endpoint - serves index.html from static directory."""
+    if index_html_path.exists():
+        logger.debug(f"📄 Serving index.html from {index_html_path}")
+        return FileResponse(str(index_html_path), media_type="text/html")
+    else:
+        # Fallback JSON response if index.html not found
+        logger.warning("⚠️ index.html not found, returning status JSON")
+        redis_client = await get_redis_client()
+        return {
+            "status": "ok",
+            "name": "Transparent Search API",
+            "version": "1.0.0",
+            "docs": "/api/docs",
+            "redis": "connected" if redis_client else "disconnected",
+            "ui": "/static/index.html",
+        }
 
 
 @app.get("/health")
