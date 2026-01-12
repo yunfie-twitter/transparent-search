@@ -14,22 +14,18 @@ BEGIN
     REASSIGN OWNED BY search_user TO postgres;
     DROP OWNED BY search_user;
     DROP ROLE search_user;
-    RAISE NOTICE 'Dropped existing role: search_user';
   END IF;
 END $$;
 
 -- Create fresh search_user role
 CREATE ROLE search_user WITH LOGIN PASSWORD 'search_password' CREATEDB;
-RAISE NOTICE 'Created fresh role: search_user';
 
 -- Ensure transparent_search database exists
 DO $$ 
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'transparent_search') THEN
     EXECUTE 'CREATE DATABASE transparent_search OWNER search_user';
-    RAISE NOTICE 'Created database: transparent_search';
   ELSE
-    RAISE NOTICE 'Database transparent_search already exists';
     -- Change owner to search_user if not already
     EXECUTE 'ALTER DATABASE transparent_search OWNER TO search_user';
   END IF;
@@ -38,3 +34,10 @@ END $$;
 -- Grant basic privileges
 GRANT CONNECT ON DATABASE postgres TO search_user;
 GRANT ALL PRIVILEGES ON DATABASE transparent_search TO search_user;
+
+-- Connect to transparent_search and set up schema
+\c transparent_search search_user
+
+-- Create extensions if needed
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
