@@ -20,6 +20,11 @@ services:
       retries: 5
     networks:
       - search_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Redis Cache
   redis:
@@ -36,6 +41,11 @@ services:
       retries: 5
     networks:
       - search_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # FastAPI Backend
   backend:
@@ -49,38 +59,64 @@ services:
       DATABASE_URL: postgresql://search_user:search_password@postgres:5432/transparent_search
       REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: INFO
+      PYTHONUNBUFFERED: 1
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
-      - ./:/app
+      - ./app:/app/app
+      - ./main.py:/app/main.py
     networks:
       - search_network
-    command: python -m uvicorn main:app --host 0.0.0.0 --port 8080
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Frontend (React + Express Proxy)
   frontend:
     build:
-      context: frontend
+      context: ./frontend
       dockerfile: Dockerfile
     container_name: transparent-search-frontend
     ports:
       - "8081:8081"
     environment:
+      NODE_ENV: production
       PORT: 8081
       BACKEND_URL: http://backend:8080
       REACT_APP_API_BASE_URL: /api
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - search_network
-    command: npm start
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8081/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   postgres_data:
+    driver: local
   redis_data:
+    driver: local
 
 networks:
   search_network:
