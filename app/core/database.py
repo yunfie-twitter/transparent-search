@@ -63,7 +63,7 @@ def run_alembic_migrations():
     try:
         logger.info("🔄 Running Alembic migrations...")
         result = subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            ["alembic", "upgrade", "head"],
             capture_output=True,
             text=True,
             cwd="/app",
@@ -77,6 +77,9 @@ def run_alembic_migrations():
             logger.warning(f"⚠️ Alembic migration had issues: {result.stderr}")
             if "No such table" in result.stderr or "does not exist" in result.stderr:
                 logger.info("📝 Creating initial schema...")
+    except FileNotFoundError:
+        logger.warning("⚠️ Alembic command not found")
+        logger.info("📝 Falling back to Base.metadata.create_all()")
     except Exception as e:
         logger.warning(f"⚠️ Could not run Alembic migrations: {e}")
         logger.info("📝 Falling back to Base.metadata.create_all()")
