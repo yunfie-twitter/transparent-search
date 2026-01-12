@@ -23,7 +23,7 @@
 
         .container {
             width: 100%;
-            max-width: 600px;
+            max-width: 700px;
             background: white;
             border-radius: 16px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
@@ -95,10 +95,31 @@
             transform: translateY(-50%) scale(0.98);
         }
 
+        .search-controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            align-items: center;
+        }
+
+        .limit-control {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+        }
+
+        .limit-control select {
+            padding: 6px 10px;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
         .results {
             margin-top: 20px;
-            max-height: 400px;
-            overflow-y: auto;
+            min-height: 200px;
         }
 
         .result-item {
@@ -114,6 +135,12 @@
             background: #f5f5f5;
             border-color: #667eea;
             transform: translateX(4px);
+        }
+
+        .result-item-index {
+            font-size: 12px;
+            color: #999;
+            margin-bottom: 4px;
         }
 
         .result-title {
@@ -134,11 +161,74 @@
             line-height: 1.5;
         }
 
+        .result-score {
+            font-size: 11px;
+            color: #999;
+            margin-top: 8px;
+        }
+
         .status {
             text-align: center;
             color: #999;
             font-size: 13px;
             margin-top: 20px;
+            margin-bottom: 20px;
+        }
+
+        .pagination {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+            flex-wrap: wrap;
+        }
+
+        .pagination button,
+        .pagination span {
+            padding: 8px 12px;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            background: white;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s ease;
+        }
+
+        .pagination button:hover {
+            border-color: #667eea;
+            background: #f5f5f5;
+            color: #667eea;
+        }
+
+        .pagination button:active {
+            transform: scale(0.95);
+        }
+
+        .pagination button.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-color: #667eea;
+        }
+
+        .pagination button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .pagination span {
+            color: #999;
+            border: none;
+            cursor: default;
+            padding: 8px 4px;
+        }
+
+        .pagination-info {
+            text-align: center;
+            font-size: 13px;
+            color: #999;
+            margin-top: 12px;
         }
 
         .loading {
@@ -212,6 +302,17 @@
             <button class="search-button" id="searchButton">検索</button>
         </div>
 
+        <div class="search-controls" id="searchControls" style="display: none;">
+            <div class="limit-control">
+                <label for="limitSelect">1ページあたり：</label>
+                <select id="limitSelect">
+                    <option value="10" selected>10 件</option>
+                    <option value="20">20 件</option>
+                    <option value="50">50 件</option>
+                </select>
+            </div>
+        </div>
+
         <div class="loading" id="loading">
             <div class="spinner"></div>
             <div>検索中...</div>
@@ -220,6 +321,9 @@
         <div class="results" id="results"></div>
 
         <div class="status" id="status"></div>
+
+        <div class="pagination" id="pagination" style="display: none;"></div>
+        <div class="pagination-info" id="paginationInfo"></div>
 
         <div class="info-box">
             <strong>ℹ️ API ドキュメント</strong><br>
@@ -236,13 +340,36 @@
         const resultsDiv = document.getElementById('results');
         const loadingDiv = document.getElementById('loading');
         const statusDiv = document.getElementById('status');
+        const paginationDiv = document.getElementById('pagination');
+        const paginationInfo = document.getElementById('paginationInfo');
+        const searchControls = document.getElementById('searchControls');
+        const limitSelect = document.getElementById('limitSelect');
+
+        // 状態管理
+        let currentPage = 1;
+        let currentQuery = '';
+        let totalResults = 0;
+        let currentLimit = 10;
 
         // 検索ボタンのクリックイベント
-        searchButton.addEventListener('click', performSearch);
+        searchButton.addEventListener('click', () => {
+            currentPage = 1;
+            performSearch();
+        });
 
         // Enterキーで検索
         searchInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {
+                currentPage = 1;
+                performSearch();
+            }
+        });
+
+        // 1ページあたりの件数変更イベント
+        limitSelect.addEventListener('change', (e) => {
+            currentLimit = parseInt(e.target.value);
+            currentPage = 1;
+            if (currentQuery.trim()) {
                 performSearch();
             }
         });
@@ -252,16 +379,28 @@
 
             if (!query) {
                 statusDiv.textContent = '検索キーワードを入力してください';
+                resultsDiv.innerHTML = '';
+                paginationDiv.style.display = 'none';
+                paginationInfo.textContent = '';
+                searchControls.style.display = 'none';
                 return;
             }
 
+            currentQuery = query;
             loadingDiv.style.display = 'block';
             resultsDiv.innerHTML = '';
             statusDiv.textContent = '';
+            paginationDiv.style.display = 'none';
+            paginationInfo.textContent = '';
 
             try {
-                // API エンドポイント（実装は別途）
-                const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+                // オフセット計算
+                const offset = (currentPage - 1) * currentLimit;
+
+                // API エンドポイントを呼び出し
+                const response = await fetch(
+                    `/api/search?q=${encodeURIComponent(query)}&limit=${currentLimit}&offset=${offset}`
+                );
 
                 if (!response.ok) {
                     throw new Error(`HTTP Error: ${response.status}`);
@@ -269,29 +408,120 @@
 
                 const data = await response.json();
 
-                if (data.results && data.results.length > 0) {
-                    displayResults(data.results);
-                    statusDiv.textContent = `${data.results.length} 件の検索結果`;
+                if (data.data && data.data.length > 0) {
+                    totalResults = data.meta.count;
+                    displayResults(data.data, offset);
+                    updatePagination();
+                    searchControls.style.display = 'flex';
+                    statusDiv.textContent = `全 ${totalResults} 件中 (所要時間: ${data.meta.took_ms}ms)`;
                 } else {
+                    if (currentPage > 1) {
+                        // ページ範囲外の場合
+                        currentPage = 1;
+                        performSearch();
+                        return;
+                    }
                     resultsDiv.innerHTML = '<div class="error">検索結果が見つかりませんでした</div>';
                     statusDiv.textContent = '0 件の検索結果';
+                    paginationDiv.style.display = 'none';
+                    paginationInfo.textContent = '';
+                    searchControls.style.display = 'none';
                 }
             } catch (error) {
                 resultsDiv.innerHTML = `<div class="error">⚠️ エラー: ${error.message}</div>`;
                 statusDiv.textContent = 'エラーが発生しました';
+                paginationDiv.style.display = 'none';
+                paginationInfo.textContent = '';
+                searchControls.style.display = 'none';
             } finally {
                 loadingDiv.style.display = 'none';
             }
         }
 
-        function displayResults(results) {
-            resultsDiv.innerHTML = results.map((item) => `
-                <div class="result-item" onclick="window.open('${escapeHtml(item.url)}', '_blank')">
-                    <div class="result-title">${escapeHtml(item.title || 'タイトルなし')}</div>
-                    <div class="result-url">${escapeHtml(item.url || '')}</div>
-                    <div class="result-preview">${escapeHtml((item.preview || item.description || '').substring(0, 150))}</div>
-                </div>
-            `).join('');
+        function displayResults(results, offset) {
+            resultsDiv.innerHTML = results.map((item, index) => {
+                const itemNumber = offset + index + 1;
+                return `
+                    <div class="result-item" onclick="window.open('${escapeHtml(item.url)}', '_blank')">
+                        <div class="result-item-index">${itemNumber}. ${escapeHtml(item.domain || 'Unknown Domain')}</div>
+                        <div class="result-title">${escapeHtml(item.title || 'タイトルなし')}</div>
+                        <div class="result-url">${escapeHtml(item.url || '')}</div>
+                        <div class="result-preview">${escapeHtml((item.snippet || item.description || '').substring(0, 150))}</div>
+                        ${item.score ? `<div class="result-score">スコア: ${(item.score * 100).toFixed(1)}%</div>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function updatePagination() {
+            const totalPages = Math.ceil(totalResults / currentLimit);
+            const maxPagesToShow = 7;
+            let startPage = Math.max(1, currentPage - Math.floor(maxPagesToShow / 2));
+            let endPage = Math.min(totalPages, startPage + maxPagesToShow - 1);
+
+            // 端の調整
+            if (endPage - startPage + 1 < maxPagesToShow) {
+                startPage = Math.max(1, endPage - maxPagesToShow + 1);
+            }
+
+            let paginationHtml = '';
+
+            // 前へボタン
+            paginationHtml += `
+                <button onclick="goToPage(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''}>
+                    ← 前へ
+                </button>
+            `;
+
+            // 最初のページ
+            if (startPage > 1) {
+                paginationHtml += `<button onclick="goToPage(1)">1</button>`;
+                if (startPage > 2) {
+                    paginationHtml += `<span>...</span>`;
+                }
+            }
+
+            // ページ番号
+            for (let i = startPage; i <= endPage; i++) {
+                if (i === currentPage) {
+                    paginationHtml += `<button class="active">${i}</button>`;
+                } else {
+                    paginationHtml += `<button onclick="goToPage(${i})">${i}</button>`;
+                }
+            }
+
+            // 最後のページ
+            if (endPage < totalPages) {
+                if (endPage < totalPages - 1) {
+                    paginationHtml += `<span>...</span>`;
+                }
+                paginationHtml += `<button onclick="goToPage(${totalPages})">${totalPages}</button>`;
+            }
+
+            // 次へボタン
+            paginationHtml += `
+                <button onclick="goToPage(${currentPage + 1})" ${currentPage === totalPages ? 'disabled' : ''}>
+                    次へ →
+                </button>
+            `;
+
+            paginationDiv.innerHTML = paginationHtml;
+            paginationDiv.style.display = 'flex';
+
+            // ページ情報
+            const startItem = (currentPage - 1) * currentLimit + 1;
+            const endItem = Math.min(currentPage * currentLimit, totalResults);
+            paginationInfo.textContent = `ページ ${currentPage} / ${totalPages} (${startItem}～${endItem} 件目 / 全 ${totalResults} 件)`;
+        }
+
+        function goToPage(pageNum) {
+            const totalPages = Math.ceil(totalResults / currentLimit);
+            if (pageNum >= 1 && pageNum <= totalPages) {
+                currentPage = pageNum;
+                performSearch();
+                // ページトップにスクロール
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            }
         }
 
         function escapeHtml(text) {
@@ -302,8 +532,11 @@
                 '"': '&quot;',
                 "'": '&#039;'
             };
-            return text.replace(/[&<>"']/g, (m) => map[m]);
+            return String(text).replace(/[&<>"']/g, (m) => map[m]);
         }
+
+        // グローバルにするためにwindowに登録
+        window.goToPage = goToPage;
 
         // 初期化時のステータス表示
         statusDiv.textContent = 'アプリケーション起動完了 ✨';
