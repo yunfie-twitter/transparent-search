@@ -1,153 +1,87 @@
-# ================================================================
-# Docker Compose Configuration for Transparent Search
-# ================================================================
-# 
-# NOTE: The 'version' attribute is deprecated in modern Docker Compose.
-#       It is completely ignored by Docker Compose v2+.
-#       Removed to avoid confusion and follow current best practices.
-#
+version: '3.8'
 
 services:
-  # ================================================================
-  # PostgreSQL Database Service
-  # ================================================================
-  # 
-  # Security & Network Design:
-  #   - REMOVED: ports: ["5432:5432"]
-  #   - WHY: Only Docker internal network (app_network) needs DB access
-  #   - FastAPI container can access DB via container name DNS
-  #   - No need to expose DB to host machine (security risk)
-  #   - If debugging needed, use: docker exec transparent_search_postgres psql -U app_user -d transparent_search
-  #
-  # Docker Network Communication:
-  #   Container names auto-resolve via Docker DNS within the same network
-  #   Example: transparent_search_app uses transparent_search_db:5432
-  #   (NOT localhost:5432 - that wouldn't work in containers)
-  #
-  transparent_search_db:
-    image: postgres:16
-    container_name: transparent_search_postgres
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: transparent-search-postgres
     environment:
       POSTGRES_DB: transparent_search
-      POSTGRES_USER: app_user
-      POSTGRES_PASSWORD: app_password
-    # REMOVED ports section - only Docker internal network access
+      POSTGRES_USER: search_user
+      POSTGRES_PASSWORD: search_password
     volumes:
-      - db_data:/var/lib/postgresql/data
-    networks:
-      - app_network
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U app_user -d transparent_search"]
+      test: ["CMD-SHELL", "pg_isready -U search_user"]
       interval: 10s
       timeout: 5s
       retries: 5
-
-  # ================================================================
-  # Redis Cache Service
-  # ================================================================
-  # 
-  # Security & Network Design:
-  #   - REMOVED: ports: ["6379:6379"]
-  #   - WHY: Only Docker internal network (app_network) needs cache access
-  #   - FastAPI container can access Redis via container name DNS
-  #   - No need to expose Redis to host machine (major security risk - no auth by default)
-  #   - If debugging needed, use: docker exec transparent_search_redis redis-cli
-  #
-  # AOF (Append-Only File) Persistence:
-  #   command: redis-server --appendonly yes
-  #   - Data persists across container restarts
-  #   - Stored in cache_data volume
-  #   - Clean restart: docker-compose down -v (removes data)
-  #
-  transparent_search_cache:
-    image: redis:7-alpine
-    container_name: transparent_search_redis
-    # REMOVED ports section - only Docker internal network access
-    command: redis-server --appendonly yes
-    volumes:
-      - cache_data:/data
     networks:
-      - app_network
+      - search_network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: transparent-search-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - search_network
 
-  # ================================================================
-  # FastAPI Application Service
-  # ================================================================
-  # 
-  # Port Exposure:
-  #   - ONLY 8080 exposed to host (FastAPI API endpoint)
-  #   - This is the single entry point for users
-  #   - DB and Cache remain internal-only (not accessible from host)
-  #
-  # Internal Communication via Docker Network (app_network):
-  #   - DATABASE_URL: postgresql+asyncpg://app_user:app_password@transparent_search_db:5432/transparent_search
-  #     ^ 'transparent_search_db' is the container name (Docker DNS resolves it)
-  #   - REDIS_URL: redis://transparent_search_cache:6379/0
-  #     ^ 'transparent_search_cache' is the container name (Docker DNS resolves it)
-  #
-  # Docker Network Architecture (Bridge Network):
-  #   - app_network (bridge) connects all three containers
-  #   - Containers can communicate using container names as hostnames
-  #   - Host cannot directly access DB or Cache (intentional)
-  #   - Only port 8080 bridges to host machine
-  #
-  # Startup Sequence:
-  #   1. DB and Cache must pass healthchecks before app starts
-  #   2. python -m app.migrations runs database initialization
-  #   3. FastAPI server starts and is ready for requests
-  #
-  transparent_search_app:
+  # FastAPI Backend
+  backend:
     build:
       context: .
-      dockerfile: Dockerfile
-    container_name: transparent_search_app
-    environment:
-      # Container names used for DNS resolution within Docker network
-      # (NOT localhost - localhost would refer to the container itself, not other services)
-      DATABASE_URL: postgresql+asyncpg://app_user:app_password@transparent_search_db:5432/transparent_search
-      REDIS_URL: redis://transparent_search_cache:6379/0
-      LOG_LEVEL: INFO
+      dockerfile: Dockerfile.backend
+    container_name: transparent-search-backend
     ports:
-      # ONLY expose API port - this is the entry point for users
       - "8080:8080"
+    environment:
+      DATABASE_URL: postgresql://search_user:search_password@postgres:5432/transparent_search
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: INFO
     depends_on:
-      transparent_search_db:
+      postgres:
         condition: service_healthy
-      transparent_search_cache:
+      redis:
         condition: service_healthy
-    networks:
-      - app_network
     volumes:
-      - .:/app
-    # 📝 Startup command:
-    #    1. python -m app.migrations    - Initialize database schema
-    #    2. uvicorn ...                 - Start FastAPI server
-    command: sh -c "python -m app.migrations && python -m uvicorn app.main:app --host 0.0.0.0 --port 8080"
+      - ./:/app
+    networks:
+      - search_network
+    command: python -m uvicorn main:app --host 0.0.0.0 --port 8080
 
-# ================================================================
-# Persistent Volumes
-# ================================================================
+  # Frontend (React + Express Proxy)
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+    container_name: transparent-search-frontend
+    ports:
+      - "8081:8081"
+    environment:
+      PORT: 8081
+      BACKEND_URL: http://backend:8080
+      REACT_APP_API_BASE_URL: /api
+    depends_on:
+      - backend
+    networks:
+      - search_network
+    command: npm start
+
 volumes:
-  db_data:
-    # PostgreSQL database files
-    # Survives docker-compose down (use -v flag to delete)
-  cache_data:
-    # Redis AOF (Append-Only File) for persistence
-    # Survives docker-compose down (use -v flag to delete)
+  postgres_data:
+  redis_data:
 
-# ================================================================
-# Docker Network
-# ================================================================
 networks:
-  app_network:
+  search_network:
     driver: bridge
-    # All containers join this network and can communicate by container name
-    # Examples:
-    #   - transparent_search_app can reach transparent_search_db via DNS
-    #   - transparent_search_app can reach transparent_search_cache via DNS
-    #   - Host can ONLY access transparent_search_app:8080
-    #   - Host CANNOT access DB:5432 or Cache:6379 (intentional security design)
