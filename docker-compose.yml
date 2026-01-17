@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   # PostgreSQL Database
   postgres:
@@ -7,15 +9,18 @@ services:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_INITDB_ARGS: "-c password_encryption=scram-sha-256"
+      POSTGRES_INITDB_ARGS: "-c password_encryption=scram-sha-256 -c max_connections=200"
+      # Prevent PostgreSQL from complaining about missing directories
+      TZ: UTC
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init-db.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres && psql -U postgres -d postgres -c 'SELECT EXISTS(SELECT FROM pg_database WHERE datname = \"transparent_search\");'"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
     networks:
       - search_network
     logging:
@@ -23,6 +28,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    restart: unless-stopped
 
   # Redis Cache
   redis:
@@ -35,6 +41,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
     networks:
       - search_network
     logging:
@@ -42,6 +49,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    restart: unless-stopped
 
   # FastAPI Backend
   backend:
@@ -56,6 +64,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: INFO
       PYTHONUNBUFFERED: 1
+      # PostgreSQL connection retry settings
+      DB_CONNECTION_TIMEOUT: 30
+      DB_POOL_SIZE: 20
+      DB_POOL_OVERFLOW: 40
     depends_on:
       postgres:
         condition: service_healthy
@@ -70,13 +82,14 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 5
+      start_period: 60s
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+    restart: unless-stopped
 
   # Frontend (React + Express Proxy)
   frontend:
@@ -107,6 +120,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    restart: unless-stopped
 
 volumes:
   postgres_data:
